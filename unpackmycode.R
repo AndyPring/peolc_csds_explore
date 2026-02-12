@@ -1,0 +1,15 @@
+codeinput <- read_file("allmycode.txt")
+codesplit <- str_split(codeinput, "FILEBEGIN ")
+
+savedir <- "sdecode"
+
+walk(unlist(codesplit)[-1], \(x) {
+  split <- str_split(x, "NAMEEND") %>% unlist()
+  name <- str_remove(split[1], "NAMESTART_") %>% str_replace_all(" ", "_")
+  
+  tmpdir <- file.path(savedir, dirname(name))
+  dir.create(tmpdir, showWarnings = FALSE, recursive = TRUE)
+  cat(
+    split[2] %>% replace_all("\r\r\n", "\r\n"),
+    file = file.path(tmpdir, basename(name)))
+})
