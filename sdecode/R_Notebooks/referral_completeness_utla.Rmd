@@ -1,0 +1,223 @@
+```{r set up, message=FALSE, warning=FALSE, include=FALSE}
+
+library(SparkR)
+library(sparklyr)
+library(DBI)
+library(tidyverse)
+library(dbplyr)
+if(!require(PHEindicatormethods)) install.packages("PHEindicatormethods", repos = "https://packages.sde.digital.nhs.uk/repository/cran-mirror/", dependencies = TRUE)
+library(PHEindicatormethods)
+if (!require(afcharts)) install.packages('afcharts')
+library(afcharts)
+if (!require(openxlsx)) install.packages('openxlsx')
+library(openxlsx)
+library(afcharts)
+
+con <- dbConnect(
+  odbc::odbc(),
+  dsn = 'Databricks',
+  HTTPPath = 'sql/protocolv1/o/8723547585282153/1007-063142-dtxq2zhk',
+  PWD = rstudioapi::askForPassword('Please enter Databricks PAT')
+)
+
+is.integer64 <- function(x) {class(x)=="integer64"}
+
+round_f <- function(x) {
+  ifelse(
+    x < 10,
+    0,
+    10 * round(x/10)
+    )}
+
+round_ft <- function(x) {
+  y <- round_f(x)
+  ifelse(
+    y ==0,
+    "<10",
+    format(y)
+  )}
+```
+```{sql, connection = con, output.var = referrals_utla}
+
+WITH ref AS (  
+  SELECT PERSON_ID_DEID, 
+    utlacd,
+    utlanm, 
+    regioncd,
+    MAX(CASE 
+        WHEN Pseudo_PrimaryReferralReason = '026'
+            OR Pseudo_ReferralReason_Other LIKE '%026%'
+            OR TeamType IN (14, 47) THEN 1    -- EOL referral
+        ELSE 0                                -- referral, not EOL
+        END ) AS ref_eol
+  FROM dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_csds_ref 
+  WHERE yod = 2024 AND DATEDIFF(dod, ReferralRequest_ReceivedDate) <=365
+  GROUP BY PERSON_ID_DEID, 
+    utlacd,
+    utlanm, 
+    regioncd)
+  ,
+  dths AS (
+  SELECT 
+    COUNT(*) AS dths,
+    utlacd, 
+    utlanm,
+    regioncd
+  FROM dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_deaths_cohort
+  WHERE yod=2024
+  GROUP BY
+    utlacd, 
+    utlanm,
+    regioncd
+    )
+  ,
+  ref2 AS (
+  SELECT
+    SUM(ref_eol) AS ref_eol,
+    COUNT(*) AS ref_any,
+    utlacd,
+    utlanm,
+    regioncd
+  FROM ref
+  GROUP BY 
+    utlacd,
+    utlanm,
+    regioncd)
+    
+  SELECT 
+    d.utlacd,
+    d.utlanm,
+    d.regioncd,
+    r.ref_eol,
+    r.ref_any,
+    d.dths
+  FROM ref2 AS r 
+  LEFT JOIN dths AS d
+  ON d.utlacd = r.utlacd
+  
+```
+  
+
+
+```{r chart, echo = FALSE}
+referrals_utla <- referrals_utla %>%
+  mutate(across(where(is.integer64), as.integer ))
+
+d <- referrals_utla  %>%
+  mutate(
+    pc_eol = 100 * ref_eol / dths,
+    pc_any = 100 * ref_any / dths,
+    pc_onlyxEOL = pc_any - pc_eol,
+    utlacd1 = fct_reorder(utlacd, pc_eol),
+    utlacd2 = fct_reorder(utlacd, pc_any),
+    utlacd3 = fct_reorder(utlacd, pc_onlyxEOL))
+  
+cht_f <- function(x) {
+  d  %>%
+  select(-c(starts_with("ref"))) %>%
+  pivot_longer(starts_with("pc_"), names_prefix = "pc_") %>%
+  filter(!name=="any") %>% 
+    mutate(utla = {{x}}) %>%
+  ggplot(aes(x = utla, y = value, fill = factor(name, level=c( "onlyxEOL", "eol")))) +
+    geom_col() +
+    labs(
+      title = "Proportion of people who have a CSDS referral\nin last year of life, by UTLA",
+      subtitle = "Deaths registered 2024",
+      y = "percentage\nof deaths",
+      x = "utla",
+      fill = "Referral\ncategory") +
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+}
+
+cht_f(utlacd1)
+cht_f(utlacd2)
+cht_f(utlacd3)
+
+write.csv(
+  d %>%
+    select(dths, ref_any, ref_eol) %>%
+    mutate(across(everything(), round_f)) 
+    ,
+  "../output/referals_utla.csv")
+
+
+```
+
+```{sql, connection = con, output.var = ref_act }
+-- How many referrals have activity
+WITH ref AS (
+  SELECT DISTINCT 
+    csds.Person_ID_DEID,
+    csds.Pseudo_Unique_ServiceRequestID,
+    CASE WHEN act.Pseudo_Unique_ServiceRequestID IS NULL THEN 0
+      ELSE 1 END AS activity_recorded,
+    CASE 
+        WHEN csds.Pseudo_PrimaryReferralReason = '026'
+            OR csds.Pseudo_ReferralReason_Other LIKE '%026%'
+            OR csds.TeamType IN (14, 47) THEN 1    -- EOL referral
+        ELSE 0                                -- referral, not EOL
+        END AS ref_eol
+  FROM dsa_484452_h8s1l_collab.csds_demographics_and_referral_all_years csds 
+  INNER JOIN dsa_484452_h8s1l_collab.peolc_deaths_cohort dths
+  ON csds.Person_ID_DEID = dths.DEC_CONF_NHS_NUMBER_CLEAN_DEID
+  LEFT JOIN dsa_484452_h8s1l_collab.peolc_csds_act act
+  ON csds.Pseudo_Unique_ServiceRequestID = act.Pseudo_Unique_ServiceRequestID
+  WHERE dths.yod = 2024
+    AND (datediff(dths.dod, csds.ReferralRequest_ReceivedDate) <= 365  -- Referral in last year of life
+    OR act.Person_ID_DEID IS NOT NULL)                                 -- Referral associated with activity in LYOL    
+    AND csds.Pseudo_Unique_ServiceRequestID IS NOT NULL                -- Referral has an ID
+  )
+  ,
+person AS (SELECT
+    Person_ID_DEID,
+    COUNT(*) AS referrals,
+    SUM(ref_eol) AS ref_eol,
+    SUM(CASE WHEN ref_eol = 0 THEN 1 ELSE 0 END) AS xEOL_ref,
+    SUM(ref_eol * activity_recorded) AS eol_ref_act,
+    SUM(
+      (CASE WHEN ref_eol = 0 THEN 1 ELSE 0 END) * activity_recorded) AS xEOL_ref_act
+  FROM ref
+  GROUP BY
+    PERSON_ID_DEID)
+    
+SELECT
+    COUNT(*) people,
+    referrals,
+    ref_eol,
+    xEOL_ref,
+    eol_ref_act,
+    xEOL_ref_act
+  FROM person
+  GROUP BY
+    referrals,
+    ref_eol,
+    xEOL_ref,
+    eol_ref_act,
+    xEOL_ref_act
+
+```  
+
+```{r with_act, ECHO = FALSE}
+
+ref_act %>%
+  mutate(across(where(is.integer64), as.integer )) %>%
+  mutate(
+    eolref = (ref_eol > 0),
+    eolref_xact = (ref_eol > 0 & eol_ref_act == 0)) %>%
+  group_by ( eolref, eolref_xact) %>%
+  summarise(people = sum(people), .groups = "drop") %>%
+  mutate(
+    category = case_when(
+      !eolref ~ "people with referral but none eol",
+      eolref & eolref_xact ~ "people with eol referral(s) including activity",
+      eolref & !eolref_xact ~ "people with eol referral(s) but no activity"),
+    people = round_f(people)) %>%
+  select(people, category) %>%
+  write.csv("../output/referals_xact.csv")
+
+``` 

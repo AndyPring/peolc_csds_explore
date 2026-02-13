@@ -1,0 +1,1177 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r setup, echo = FALSE}
+library(SparkR)
+library(sparklyr)
+library(DBI)
+library(tidyverse)
+library(dbplyr)
+if(!require(janitor)) install.packages("janitor")
+library(janitor)
+library(survival)
+source("aftheme_mod.R")
+
+# if(!require(PHEindicatormethods)) install.packages("PHEindicatormethods", repos = "https://packages.sde.digital.nhs.uk/repository/cran-mirror/", dependencies = TRUE)
+# library(PHEindicatormethods)
+#if (!require(afcharts)) install.packages('afcharts')
+#library(afcharts)
+#if (!require(openxlsx)) install.packages('openxlsx')
+#library(openxlsx)
+#if (!require(svglite)) install.packages('svglite')
+#library(svglite)
+
+#library(afcharts)
+
+con <- dbConnect(
+odbc::odbc(),
+dsn = 'databricks',
+HTTPPath = 'sql/protocolv1/o/8723547585282153/1007-063142-dtxq2zhk',
+PWD = rstudioapi::askForPassword('Please enter Databricks PAT'))
+
+#############################
+spellsdays <- 365
+h_spc_days <- 365
+period <- 90
+#############################
+
+is.integer64 <- function(x) {class(x)=="integer64"}
+
+round_f <- function(x) {
+  ifelse(
+    x < 10,
+    0,
+    10 * round(x/10)
+    )}
+
+round_ft <- function(x) {
+  y <- round_f(x)
+  ifelse(
+    y ==0,
+    "<10",
+    format(y)
+  )}
+```
+
+
+
+```{sql cohort, connection = con, output.var = cohort}
+WITH ref AS (
+SELECT DISTINCT
+PERSON_ID_DEID,
+--CASE
+--  WHEN AccomStatus IS NULL OR AccomStatus LIKE 'OC%' THEN 'NK'
+--  WHEN AccomStatus LIKE 'MA%' THEN 'MS'
+--  WHEN AccomStatus LIKE 'CH%' THEN 'CH'
+--  WHEN AccomStatus LIKE 'SH03' THEN 'NH'
+--  ELSE 'Other' END AS Accom,
+CASE 
+  WHEN Pseudo_PrimaryReferralReason = '026'
+        OR Pseudo_ReferralReason_Other LIKE '%026%'
+        OR TeamType = 14
+        OR TeamType = 47 THEN 1
+  ELSE 0 END AS eol_ref,
+DATEDIFF(dod, ReferralRequest_ReceivedDate) AS date_ref
+FROM dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_csds_ref AS ref
+WHERE yod = 2024 AND DATEDIFF(dod, ReferralRequest_ReceivedDate) BETWEEN 0 AND  365 )
+,
+
+ref_person AS (
+SELECT 
+PERSON_ID_DEID, 
+MAX(date_ref) AS ref_any,
+MAX(IFF(eol_ref=1, date_ref, NULL)) AS ref_eol
+FROM ref 
+GROUP BY PERSON_ID_DEID)
+--,
+--ref_accom AS(
+--SELECT 
+--PERSON_ID_DEID,
+--Accom, date_ref
+--FROM ref
+--PIVOT (MAX(date_ref) AS latest,
+--MIN(date_ref) AS earliest
+--FOR Accom IN ('NK', 'CH', 'NH', 'MS', 'Other'))
+--)
+
+SELECT
+  DEC_CONF_NHS_NUMBER_CLEAN_DEID AS PERSON_ID_DEID,
+  DEC_SEX,
+  xage_cat,
+  ucod_cat,
+  eol_pod,
+  ref_any,
+  ref_eol,
+  utlanm, regioncd
+  -- ,a.* EXCEPT PERSON_ID_DEID
+FROM  dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_deaths_cohort d
+-- LEFT JOIN dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_lsoa_ltla_utla AS geog on d.LSOA11 =  geog.LSOA11cd  
+LEFT JOIN ref_person r
+ON d.DEC_CONF_NHS_NUMBER_CLEAN_DEID = r.PERSON_ID_DEID
+-- LEFT JOIN ref_accom a ON d.DEC_CONF_NHS_NUMBER_CLEAN_DEID = a.PERSON_ID_DEID
+WHERE d.yod = 2024
+
+```
+
+```{r tidy cohort, echo = FALSE}
+refcut <- c(-1, 14, 30, 90, 180)
+refint <- map(1:(length(refcut)+1), \(x) {
+  tibble(txt = case_when(
+    x == 1 ~ "None",
+    x == length(refcut) +1 ~ paste(refcut[length(refcut)] + 1 , "and over"),
+    TRUE ~ paste(refcut[x-1] + 1, "to", refcut[x]))
+    ,
+  formal = case_when(
+    x==1 ~ paste0("(-Inf,", refcut[x],"]"),
+    x == length(refcut) +1 ~ paste0("(", refcut[length(refcut)]  , ", Inf]"),
+    TRUE ~ paste0("(", refcut[x-1], ",", refcut[x],"]"))
+  )}) %>% bind_rows() 
+
+
+c2 <- cohort %>%
+  filter(
+    !is.na(PERSON_ID_DEID),
+    !xage_cat == "0-17",
+    !ucod_cat == "External")  %>%
+  mutate(
+    PERSON_ID_DEID,
+    ucod_cat = factor(ucod_cat,
+                      levels = c("Cancer",
+                                 "Cardiovascular disease",
+                                 "Dementia",
+                                 "HIV/AIDS",
+                                 "Liver disease",
+                                 "Neurological disease",
+                                 "Other",
+                                 "Renal disease",
+                                 "Respiratory Disease" ),
+                      labels = c("Cancer",
+                                 "Cardiovascular disease",
+                                 "Dementia",
+                                 "Other",
+                                 "Liver disease",
+                                 "Neurological disease",
+                                 "Other",
+                                 "Other",
+                                 "Respiratory Disease" )),
+    xage_cat = factor(xage_cat,
+                      levels = c("85+", "75-84", "65-74", "18-64")),
+    eol_pod,
+    ch_pod = factor(case_when(
+      eol_pod =="Care home" ~ "Y",
+      T ~ "N"), 
+      levels = c("Y", "N")),
+    sex = factor(DEC_SEX, levels = c("1","2"), labels = c("Male", "Female")),
+    ref_eol,
+    refcat = cut(replace_na(ref_eol, -999), c(-Inf, refcut, Inf)) %>% 
+      fct_relabel(~case_when(
+        str_detect(.x, "-Inf") ~ "None",
+        TRUE ~ .x)),
+    utlanm,
+    regioncd,
+    .keep = "none") %>%
+  unique()
+
+
+```
+
+
+
+```{r quick look at referrals, echo = FALSE}
+rgnames <- tbl(con, sql("
+  SELECT geogcd, FIRST(geognm) geognm
+  FROM dsa_484452_h8s1l.dhsc_byod.geographical_codes_lsoa_msoa_e12_rgn
+  GROUP BY geogcd
+  ")) %>% collect()
+
+byutla <- c2 %>%
+  mutate(eol_ref =!is.na(ref_eol)) %>%
+  group_by(utlanm, regioncd) %>%
+  summarise(
+    dths=n(),
+    eol_ref= sum(eol_ref),
+    dih = sum(eol_pod == "Hospital")) %>%
+  mutate(
+    pc_ref = 100* eol_ref/dths,
+    pc_dih = 100*dih/dths) %>%
+  arrange(pc_ref) 
+
+byutla %>% 
+  left_join(rgnames %>% rename(rgname=geognm), by = c("regioncd" = "geogcd")) %>%
+  ggplot((aes(x=rgname, y=pc_ref))) +
+  geom_point()
+
+byutla %>%
+  mutate(utlanm = factor(utlanm, levels = byutla$utlanm)) %>% 
+  ggplot(aes(y=pc_ref, x=utlanm)) +
+  geom_col() +
+  labs(
+    x = "UTLA",
+    y = "Percentage",
+    title = "Percentage of all deaths that have an EOL referral ") +
+  aftheme_mod(base_size = 11) +
+  theme(axis.text.x = element_blank())
+
+ggsave("../output/ref_utla.png", units = "in", dpi = 300,  width = 8, height = 6 )
+
+byutla %>% ggplot(aes(x=pc_ref, y=pc_dih)) +
+  geom_point() +
+  geom_smooth()
+  
+c2 %>% 
+  mutate (eolref = !is.na(ref_eol)) %>%
+  group_by(eolref) %>%
+    summarise(
+    dths=n(),
+    dih = sum(eol_pod == "Hospital")) %>%
+  mutate(pc_dih = 100*dih/dths)
+  
+fancy <- c2 %>% 
+  mutate (eolref = !is.na(ref_eol)) %>%
+  group_by(utlanm) %>%
+    summarise(
+    dths = n(),
+    dths_e = sum(eolref), 
+    dih = sum(eol_pod == "Hospital" ),
+    dih_e = sum((eol_pod == "Hospital" & eolref))) %>%
+  mutate(
+    pc_e = 100 * dths_e/dths,
+    pc_dih = 100 * dih / dths,
+    pc_dihe = 100 * dih_e / dths_e,
+    pc_dihx = 100 * (dih -dih_e) / (dths - dths_e)) 
+  
+
+fancy %>%
+  mutate(utlanm = fct_reorder(utlanm, pc_dih)) %>%
+  ggplot(aes(x=utlanm)) +
+  geom_line(aes(y=pc_dih, group=TRUE)) +
+  geom_smooth(aes(y=pc_dihe, group = TRUE), colour="blue", se=FALSE) +
+  geom_smooth(aes(y=pc_dihx, group = TRUE), colour="red", se=FALSE) +
+  geom_segment(aes(y=pc_dihe, yend = pc_dihx, xend = utlanm )) +
+  geom_point(aes(y=pc_dihe, colour="blue" )) +
+  geom_point(aes(y=pc_dihx, colour="red")) +
+  scale_colour_manual(values = c("blue", "red"),labels = c("Yes","No"), name = "EOL referral") +
+  labs(
+    x= "UTLA ordered by % deaths in hospital (more on right)",
+    y="% dih"
+  )  +
+  aftheme_mod() +
+  theme(axis.text.x = element_blank())
+
+ggsave("../output/dih_utla1.png", units = "in", dpi = 300,  width = 8, height = 6 )
+
+
+
+fancy %>%
+  mutate(utlanm = fct_reorder(utlanm, pc_e)) %>%
+  ggplot(aes(x=utlanm)) +
+  geom_line(aes(y=pc_dih, group=TRUE)) +
+  geom_smooth(aes(y=pc_dihe, group = TRUE), colour="blue", se=FALSE) +
+  geom_smooth(aes(y=pc_dihx, group = TRUE), colour="red", se=FALSE) +
+  geom_segment(aes(y=pc_dihe, yend = pc_dihx, xend = utlanm )) +
+  geom_point(aes(y=pc_dihe, colour="blue" )) +
+  geom_point(aes(y=pc_dihx, colour="red")) +
+  scale_colour_manual(values = c("blue", "red"),labels = c("Yes","No"), name = "EOL referral")  +
+  labs(
+    x= "UTLA ordered by % deaths with EOL referral (more on right)",
+    y="Percentage dih"
+  ) +
+  aftheme_mod() +
+  theme(axis.text.x = element_blank())
+
+ggsave("../output/dih_utla2.png", units = "in", dpi = 300,  width = 8, height = 6 )
+
+
+
+```  
+
+```{r a bit more ref exploring, echo = FALSE}
+
+ref_summary <- cohort %>%
+  summarise(
+    deaths_all = n(),
+    deaths_any = sum(!is.na(ref_any)),
+    deaths_eol = sum(!is.na(ref_eol))) %>%
+  mutate(
+    pc_all = 100,
+    pc_any = 100 * deaths_any / deaths_all,
+    pc_eol = 100 * deaths_eol / deaths_all) %>%
+  pivot_longer(cols = everything(),  names_sep = "_", names_to = c('.value', "group"))
+
+
+cohort_ref_over_time <- map(0:365, function(x){
+  cohort %>% 
+    group_by(xage_cat, ucod_cat) %>%
+    summarise(
+      eolref = sum(
+        case_when(
+          ref_eol>=x ~1, T ~ 0)),
+      xeolref = sum(case_when(
+        ref_any>=x  & (is.na(ref_eol)| ref_eol<x) ~ 1, 
+         T ~ 0)),
+      xref = sum(case_when(
+        is.na(ref_any)|ref_any<x ~1,
+        T ~0))) %>%
+    mutate(day =x)}) %>%
+  bind_rows()
+
+cohort_ref_over_time %>%
+  pivot_longer(
+    cols = contains("ref")) %>%
+  ggplot(aes(x=day, y=value, fill=name)) +
+  geom_col()  +
+  aftheme_mod()
+
+
+
+ref_dates <- bind_rows(
+  cohort %>%
+    group_by(ref_any) %>%
+    summarise(n=n(), .groups = "drop") %>%
+    mutate(n, ref = "Any", days = ref_any, .keep = "none")
+  ,
+  cohort %>%
+    group_by(ref_eol) %>%
+    summarise(n=n(), .groups = "drop") %>%
+    mutate(n, ref = "EOL", days = ref_eol, .keep = "none"))
+
+eolcut <- seq(from = 0, to = 365, by = 10)
+
+ref_dates2 <- bind_rows(
+  cohort %>%
+    mutate(eref_cat = cut(ref_eol, eolcut)) %>%
+    group_by(eref_cat, ucod_cat) %>%
+    summarise(n=n(), .groups = "drop") %>%
+    mutate(n, ref = "EOL", days = eref_cat, ucod_cat, xage_cat = "All", .keep = "none") %>%
+    ungroup
+  ,
+  cohort %>%
+        mutate(eref_cat = cut(ref_eol, eolcut)) %>%
+    group_by(eref_cat, xage_cat) %>%
+    summarise(n=n(), .groups = "drop") %>%
+    mutate(n, ref = "EOL", days = eref_cat, ucod_cat = "All", xage_cat, .keep = "none") %>%
+    ungroup) %>%
+  group_by(ucod_cat, xage_cat) %>%
+  mutate(pc=100 * n / sum(n))
+
+ref_charts <- 
+  ref_dates2 %>%
+  filter(!is.na(days)) %>%
+  group_by(ucod_cat, xage_cat) %>%
+  group_map(~{
+    ggplot(data = .x, aes(x=days, y=n)) + 
+  geom_col() +
+  labs(
+    title = paste("First CSDS referral during last year of life\n", .y[1], .y[2]),
+    y = "Number of people",
+    x = "Days before death",
+    colour = "Referral type") +
+    aftheme_mod(base_size = 11)
+})
+
+
+ref_dates %>%
+  filter(!is.na(days)) %>%
+  ggplot(aes(x=days, y=n, colour=ref)) + 
+  geom_line() +
+  labs(
+    title = "First CSDS referral during last year of life",
+    y = "Number of people",
+    x = "Days before death",
+    colour = "Referral type"
+  ) +
+  aftheme_mod(base_size = 11)
+
+ref_cumsum <- ref_dates %>%
+  filter(!is.na(days)) %>%
+  arrange(desc(days)) %>%
+  mutate(
+    total = ifelse(ref=="Any", sum((ref=="Any")*n), sum((ref=="EOL")*n)),
+    pc = 100 * n / total,
+    cumpc = ifelse(ref=="Any", cumsum((ref=="Any")*pc), cumsum((ref=="EOL")*pc))) %>%
+  filter(!is.na(days)) %>%
+  group_by(ref) %>%
+  mutate(
+    c25 = rank(abs(cumpc-25)), 
+    c50 = rank(abs(cumpc-50)),
+    c75 = rank(abs(cumpc-75))) %>%
+  ungroup() 
+
+ref_cumsum %>% filter(c25==1|c50==1|c75==1|days==0) %>%
+  mutate(
+    cumpc = round(cumpc/5,0)*5,
+    
+    ref = paste0(ref, "(N = ", round_f(total),")")) %>%
+  pivot_wider(
+    id_cols = ref,
+    names_from = cumpc,
+    values_from = days
+  ) %>%
+  write.csv("../output/refsummary.csv")
+  
+
+ref_cumsum %>%
+  ggplot(aes(x=days, y=cumpc, colour=ref)) + 
+  geom_line() +
+  geom_text(
+    data = ~filter(.x, ref=="EOL" & (c25==1|c50==1|c75==1)),
+    aes(label = paste(days, "days")),
+    nudge_x = c(-45,-40, -30),
+    show.legend=FALSE ) +
+  geom_point(
+    data = ~filter(.x, ref=="EOL" & (c25==1|c50==1|c75==1))) +
+  labs(
+    title = "First CSDS referral during last year of life",
+    y = "Cumulative\npercentage",
+    x = "Days before death",
+    colour = "Referral type"
+  ) +
+  scale_x_reverse() +
+  aftheme_mod(base_size = 11)
+
+ggsave("../output/ref_cum_pc.png", dpi=300, units = "in", width=8, height=6)
+  
+
+```
+
+
+```{sql spells, connection = con, output.var = spells  }
+WITH pal AS (
+  SELECT PERSON_ID_DEID , MAX(DATEDIFF(d.dod, epi.EPISTART)) AS h_spc_date
+  FROM dsa_484452_h8s1l.dsa_484452_h8s1l_collab.daps_hes_apc_diag_all_years epi
+  INNER JOIN dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_deaths_cohort AS d 
+  ON epi.PERSON_ID_DEID = d.DEC_CONF_NHS_NUMBER_CLEAN_DEID
+  WHERE (DIAG_4 = 'Z515' OR TRETSPEF = '315') AND DATEDIFF(d.dod, epi.EPISTART) < ?h_spc_days
+  GROUP BY PERSON_ID_DEID)
+  
+SELECT DISTINCT
+  s.PERSON_ID_DEID, 
+  DATEDIFF(d.dod,s.ADMIDATE) AS ADMIDATE, 
+  DATEDIFF(d.dod,s.DISDATE) AS DISDATE,
+  DIS_CLASSPAT,
+  IFF(s.ADMIMETH LIKE '2%', 1, 0) AS emergency,
+  pal.h_spc_date
+FROM dsa_484452_h8s1l.dsa_484452_h8s1l_collab.daps_hes_apc_spells_all_years AS s
+INNER JOIN dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_deaths_cohort AS d 
+ON s.PERSON_ID_DEID = d.DEC_CONF_NHS_NUMBER_CLEAN_DEID
+LEFT JOIN pal 
+ON d.DEC_CONF_NHS_NUMBER_CLEAN_DEID = pal.PERSON_ID_DEID  
+WHERE d.yod = 2024 AND DATEDIFF(d.dod,s.DISDATE) BETWEEN -1 AND ?spellsdays
+
+```
+
+```{r hospital v community palliative care, echo = FALSE}
+
+spells %>%
+  filter(!is.na(h_spc_date)) %>%
+  group_by(h_spc_date) %>% 
+  summarise(
+    dths = n_distinct(PERSON_ID_DEID), 
+    .groups = "drop") %>%
+  ggplot(aes(y=dths, x = h_spc_date)) +
+  geom_col()
+
+spc <- cohort %>%
+  left_join(spells %>% 
+              select(PERSON_ID_DEID, h_spc_date) %>%
+              unique()) %>%
+  mutate(
+    ref_eol_lt_h_spc = case_when(
+      is.na(ref_eol)|is.na(h_spc_date) ~ "X",
+      (ref_eol < h_spc_date ~ "Y"),
+      .default = "N"),
+    spc_h = !is.na(h_spc_date), 
+    ref_eol = !is.na(ref_eol)) %>%
+  group_by(eol_pod, ref_eol, spc_h, ref_eol_lt_h_spc) %>%
+  summarise(dths = n()) %>%
+  mutate(pod_h = (eol_pod == "Hospital"))
+
+spc_summary <- spc %>%
+  group_by(ref_eol, spc_h, pod_h, ref_eol_lt_h_spc) %>%
+  summarise(dths = sum(dths), .groups = "drop") %>%
+  mutate(pc = 100*dths/sum(dths) ) %>%
+  group_by(pod_h) %>%
+  mutate(pc_pod = 100*dths/sum(dths)) %>%
+  arrange(pod_h, ref_eol,  spc_h )
+
+write.csv(spc_summary %>%
+            select(eol_csds_referral = ref_eol,
+                   hospital_spc = spc_h,
+                   pod_hospital = pod_h,
+                   eolcsds_lt_hspc = ref_eol_lt_h_spc,
+                   dths) %>%
+            mutate(dths = round_f(dths)),
+          file = "../output/spc_summary.csv"
+          )
+
+spc_summary %>%
+  mutate(pal = case_when(
+    (ref_eol & spc_h) ~ "Community and Hospital",
+    ref_eol ~ "Community only",
+    spc_h ~ "Hospital only",
+    .default = "None")) %>%
+  ggplot((aes(x=pod_h, y=pc_pod, fill=pal))) +
+  geom_col(position = position_dodge())
+  
+
+spc_summary %>% 
+  group_by(ref_eol_lt_h_spc) %>%
+  filter(!ref_eol_lt_h_spc=="X") %>%
+  mutate(pc_b = 100 * dths/sum(dths)) %>%
+  arrange(ref_eol_lt_h_spc) %>%
+  select(pod_h, ref_eol_lt_h_spc, dths, pc, pc_b)
+
+spells %>%
+  group_by(h_spc_date) %>%
+  filter(!is.na(h_spc_date), h_spc_date >=0) %>%
+  summarise(dths = n_distinct(PERSON_ID_DEID , na.rm=TRUE)) %>%
+  arrange(desc(h_spc_date)) %>%
+  mutate(cum_pc = cumsum(dths)/sum(dths)) %>%
+  ggplot(aes(x=h_spc_date, y=cum_pc, group = TRUE)) +
+  geom_line() +
+  scale_x_reverse() +
+  aftheme_mod(base_size = 11)
+           
+
+```
+
+```{r cleaning spells, echo=FALSE}
+
+# A couple of principles to guide cleaning
+#
+# Prefer not to delete emergency admissions and dont double count days
+#
+# 1. Zero length non-emergency admissions have no effect on this analysis. Delete them.
+# 2. If ADMIDATE > DISDATE delete
+# 3. It is credible DoD and final discharge may differ by a day. So the maths works, adjust discharge dates one day after Dod to Dod
+# 4. It is credible for a person to have more than one spell to start on the same day so long as all but one of them are zero length
+# 5. In the case of 2 spells starting on the same day, both 2 days or longer, combine them by taking the greater discharge date and marking as 
+#     an emergency admission if either of them is recorded as an emergency
+# 6. Overlapping spells. For this analysis time in hospital is treated separately from dates of admission. 
+#   So, curtail the first spell on the date of admission of the subsequent spell
+
+
+# I had trouble with some of my map functions returning empty results neither TRUE or FALS, This little function helps
+ifempty <- function(x) ifelse(is_empty(x), FALSE, x )
+
+# A function to identify dodgy spells
+dodgytest <-function(df) {
+  df %>%
+    group_by(PERSON_ID_DEID, ADMIDATE) %>%          # multiple adm on same day
+    mutate(
+      shared_admidate = (n()>1)) %>%
+    group_by(PERSON_ID_DEID)  %>%
+    arrange(PERSON_ID_DEID, ADMIDATE, DISDATE) %>%
+    mutate(                                         # remember : At this point the data dates are "days before death" ordered closest to furthest from death
+      overlapping_spell = map(c(1:n()), \(x)
+                              case_when(
+                                n() == 1 ~ FALSE,
+                                x==1 ~  ifempty(ADMIDATE[x] > min(DISDATE[(x+1):n()])),
+                                x==n() ~ ifempty(DISDATE[x] < ADMIDATE[x-1]),                            
+                                TRUE ~  ifempty(ADMIDATE[x] > min(DISDATE[(x+1):n()])) |  ifempty(DISDATE[x] < ADMIDATE[x-1]))) %>% unlist())
+}
+
+spells2 <- spells %>%
+  filter(DISDATE <= period) %>%                   # Only retain rows indicating some period in 
+                                                  # hospital during the interest period
+  mutate(
+    DISDATE = ifelse(DISDATE == -1, 0, DISDATE),   # Allow 1 day leeway for dod v last discharge
+    days = ADMIDATE-DISDATE) %>%
+  filter(days > 0 | emergency == 1) %>%            # Ditch zero days admissions unless they're emergency admissions (also ditch inconsistent dates)
+                                                   # because they dont affect time at risk, or number of emergency adm
+  dodgytest() 
+
+
+# Pull out just the dodgy rows
+dodgy <- spells2 %>%
+  filter(shared_admidate | overlapping_spell) %>%
+  ungroup() %>%
+  arrange(PERSON_ID_DEID, ADMIDATE, DISDATE) %>%
+  mutate(idx = row_number())
+
+# Summary of dodgy rows
+dodgy %>%
+  group_by(shared_admidate, overlapping_spell) %>%
+  summarise(n=n())
+
+
+
+# shared adm 1 : same disdate (remove duplicates)
+
+dodgy_dup <- dodgy %>%
+  filter(days>0) %>%
+  group_by(PERSON_ID_DEID, ADMIDATE, DISDATE) %>%
+  filter(n() >1) %>%
+  arrange(PERSON_ID_DEID, ADMIDATE,desc(emergency)) %>%
+  mutate(best = row_number() == 1) 
+
+keep_dup <- dodgy_dup %>%
+  filter(best)
+
+dodgy2 <- dodgy %>%
+  filter(!idx %in% dodgy_dup$idx[!dodgy_dup$best]) %>%
+  dodgytest()
+
+# shared admidate 2: different disdate
+
+# Allow the possibilty of 2 adm share a admidate so long as the first is zero days
+# Otherwise collapse into 1 adm with latest discharge, marked as emergency
+# if any of them are emergencies
+# Remember there should be no zero length spells with planned admissions - they were removed
+
+sharedadm <- dodgy2 %>% 
+  filter(shared_admidate) %>%
+  group_by(PERSON_ID_DEID, ADMIDATE)  %>%
+  arrange(PERSON_ID_DEID, ADMIDATE, days) %>%
+  mutate(
+    a_old = ADMIDATE,
+    d_old = DISDATE,
+    e_old = emergency,
+    nice = (n() - sum(days==0) ==1),     # ie we have one long spell and one or more zero length spells
+    n_zerodays = sum(days==0),
+    n = n()) %>%
+#  filter( (n_zerodays > 1 & (n - n_zerodays) > 0) & !(row_number()=1 | days> 0)) %>%    # if there is a long and several zero, only keep the first zero
+  mutate(
+    ADMIDATE = case_when(
+      row_number() == 1 & days[1] == 0 ~  a_old + 0.01,   # if the first admissions is zero days, bring it back a tiny bit
+                                                          # survival calcs cant cope with multiple same day events
+      TRUE ~ a_old),
+    DISDATE = case_when(
+      row_number() == 1 & days[1] == 0 ~  a_old + 0.01,  # ie first row is a zero length emergency admsission  
+      row_number() == 1 & days[1] > 0 ~ min(d_old),      # first row is a long spell - make it as long as possible - other rows will be marked NA and removed
+      row_number() == 2 & days[1] == 0 ~ min(d_old),     # 2nd row only necessary if the first is zero days - make it as long as possible
+      TRUE ~ NA)) %>%                                   # We will filter these out
+  group_by(PERSON_ID_DEID, ADMIDATE) %>%                # We now have ADMIDATE split, If we have 2 long admissions, we have set the smallest disdate (longest spell)
+  mutate(                                              # now we describe the 2 row as emergency if any of the spells row=2+ are emergencies     
+    emergency = max(e_old)) %>%
+  ungroup()
+
+sharedadm_keep <- sharedadm %>% filter(!is.na(DISDATE))   # Remove the unrequired rows
+
+dodgy3 <- dodgy2 %>%
+  filter(!shared_admidate) %>%
+  bind_rows(sharedadm_keep %>% select(names(dodgy2))) %>%
+  dodgytest()
+
+# Resolve overlapping adm, preserves admidates, adjusts disdates to remove overlaps.
+
+overlap <- dodgy3 %>%
+  filter(overlapping_spell) %>%
+  group_by(PERSON_ID_DEID) %>%
+  arrange(PERSON_ID_DEID, ADMIDATE, DISDATE) %>%
+  mutate(
+    # overlap_first is lightly tricky to allow for odd arrangements of 3+ spell dates
+    overlap_first =  map(
+      as.list(1:n()), 
+      \(x) case_when(
+        x==n()  ~ FALSE,
+        x==1 ~ TRUE,
+        TRUE ~ min(DISDATE[x:n()]) >= max(ADMIDATE[1:(x-1)]) ))  %>%
+      unlist(),
+    gp = cumsum(overlap_first==TRUE)) %>%
+  group_by(PERSON_ID_DEID, gp) %>%
+  mutate(
+    d_old = DISDATE,
+    DISDATE = case_when(
+      row_number() == 1 ~ min(DISDATE),
+      TRUE ~ lag(ADMIDATE,1))) %>%
+  arrange(PERSON_ID_DEID, gp, ADMIDATE)  
+
+dodgyfixed <- bind_rows(
+    dodgy3 %>% 
+      filter(!overlapping_spell)
+    ,
+    overlap %>% 
+      ungroup() %>%
+      select(names(dodgy))) %>%
+  dodgytest()
+
+dodgyfixed %>%
+  group_by(shared_admidate, overlapping_spell) %>%
+  summarise(n=n())
+
+# Clean final
+
+spellsf <- 
+  bind_rows(
+    spells2 %>% filter(!overlapping_spell & !shared_admidate)
+    ,
+    dodgyfixed %>% select(names(spells2)) %>%
+      mutate(days = ADMIDATE - DISDATE)
+  )
+
+```
+
+```{r risk, echo = FALSE}
+
+# This works by listing the days in each spell (excluding the last day as we want zero day adm as 0 days not 1 day)
+# then combining these lists and counting unique values
+# It is impervious to overlapping spells 
+
+tih <- spells %>%
+  filter(DISDATE<=180) %>%
+  group_by(PERSON_ID_DEID) %>% 
+  summarise(
+    days = map2(DISDATE, ADMIDATE, 
+                function(x,y) {
+                  list(seq(from = x, to = y) %>% head(-1)) %>%
+                  unlist()}) %>%
+      unlist() %>%
+      keep(~.<181 & .>=0) %>%
+      n_distinct(na.rm=TRUE))
+
+tih2 <- spells %>%
+ arrange(PERSON_ID_DEID,ADMIDATE) %>%
+  slice_head(n=1000) %>%
+  left_join(c2 %>% select(PERSON_ID_DEID, ref_eol)) %>%
+  filter(DISDATE<=180) %>%
+  group_by(PERSON_ID_DEID, ref_eol)
+
+tih2 %>% 
+  summarise(
+    s=n(),
+    days =  map2(DISDATE, ADMIDATE, 
+                function(x,y) {
+                  days <- seq(from = x, to = y) %>% 
+                                 head(-1)}) %>% 
+      unlist() %>%
+      keep(~.<181 & .>=0) %>%
+      unique() %>%
+      ifelse(length(.) ==0, as.integer(.),.)) %>%
+  mutate(
+    eol = ifelse(
+          length(ref_eol)==0, 
+          0,
+          sum(days[days<ref_eol]))
+    ,
+    eolx = ifelse(
+          length(ref_eol)==0, 
+          length(days),
+          sum(days[days>=ref_eol])))
+            
+      
+
+
+c2_w_tih <- c2 %>% 
+  left_join(tih) %>%
+  mutate(
+    days = replace_na(days,0),
+    ref_eol = !is.na(ref_eol))
+
+tih_summary1 <- map(set_names(c("xage_cat", "ucod_cat", "sex")), \(x) {
+  c2_w_tih %>%
+    mutate(
+      var = get({{x}}) ) %>%
+    group_by(var, ref_eol) %>%
+    summarise(
+      dths = n(),
+      dths0 = sum(days==0),
+      days = sum(days)) %>%
+    mutate(cat = x) %>%
+    ungroup()}) %>%
+  bind_rows() %>%
+  mutate(
+    daysm = days/dths,
+    daysm_any = days/(dths-dths0)) %>%
+  select(cat, var, ref_eol, starts_with("daysm"), everything())
+
+tih_summary2 <-  c2_w_tih %>%
+  mutate(days0 = (days==0)) %>%
+  group_by(ucod_cat, xage_cat, sex, ref_eol, days0) %>%
+  summarise(
+    dths = n(),
+    days = sum(days)) %>%
+  group_by(ucod_cat, xage_cat, sex, ref_eol) %>%
+  summarise(
+    dths_any= sum(dths[!days0]),
+    dths = sum(dths),
+    days = sum(days)) %>%
+  mutate(
+    daysm = days/dths,
+    daysm_any = days/dths_any)
+
+tih_summary2 %>%
+  mutate(
+    ref_eol = ifelse(ref_eol, "Yes", "No"),
+    split=paste(sex, ref_eol),
+    square="s",
+    circle="c") %>%
+  ggplot(aes(x=xage_cat)) +
+  geom_linerange(aes(ymin = daysm, ymax = daysm_any, colour = ref_eol, linetype = sex, group = split), position= position_dodge(width = 0.5)) +
+  geom_point(aes(y=daysm, group = split, shape = square), position= position_dodge(width = 0.5)) +
+  geom_point(aes(y=daysm_any, group = split, shape = circle), position= position_dodge(width = 0.5)) +
+  scale_shape_manual(
+    values = c(15,16),
+    breaks = c("s","c"),
+    labels = c("All", "1 more days only"), 
+    name = "Cohort") +
+  labs(
+    x = "Age at death",
+    y = "Days",
+    colour = "EOL referral",
+    title = "Days in hospital, last 180 days" ) +
+  facet_wrap(facets = ~ucod_cat) +
+  aftheme_mod(base_size = 11) +
+  theme(axis.text = element_text(size = 11))
+    
+ggsave("../output/tih_av.png", units = "in", dpi = 300,  width = 8, height = 6 )
+
+
+
+tih_summary3 <-  c2_w_tih %>%
+  mutate(days0 = (days==0)) %>%
+  group_by(ucod_cat, xage_cat, sex, ref_eol) %>%
+  summarise(
+    dths = n(),
+    days_tot = sum(days),
+    dths_x0 = sum(!days0),
+    days_med = median(days),
+    days_med_x0 = median(days[!days0])) %>%
+  mutate(
+    pc_dths_x0 = 100 * dths_x0 / dths
+  )
+
+tih_summary3 %>%
+  mutate(
+    ref_eol = ifelse(ref_eol, "Yes", "No"),
+    split=paste(sex, ref_eol),
+    square="s",
+    circle="c") %>%
+  ggplot(aes(x=fct_rev(xage_cat))) +
+  geom_point(aes(y=days_med, group = sex, colour = ref_eol, shape=sex), position = position_dodge(width = 0.5)) +
+
+  labs(
+    x = "Age at death",
+    y = "Days",
+    colour = "EOL referral",
+    title = "Median days in hospital, last 180 days" ) +
+  facet_wrap(facets = ~ucod_cat) +
+  aftheme_mod(base_size = 11) +
+  theme(axis.text = element_text(size = 11))
+    
+ggsave("../output/tih_med.png", units = "in", dpi = 300,  width = 8, height = 6 )
+
+tih_summary3 %>%
+  mutate(
+    ref_eol = ifelse(ref_eol, "Yes", "No"),
+    split=paste(sex, ref_eol),
+    square="s",
+    circle="c") %>%
+  ggplot(aes(x=fct_rev(xage_cat))) +
+  geom_point(aes(y=pc_dths_x0, group = sex, colour = ref_eol, shape=sex), position = position_dodge(width = 0.5)) +
+
+  labs(
+    x = "Age at death",
+    y = "Percentage",
+    colour = "EOL referral",
+    title = "Deaths with at least 1 day in hospital, last 180 days" ) +
+  facet_wrap(facets = ~ucod_cat) +
+  aftheme_mod(base_size = 11) +
+  theme(axis.text = element_text(size = 11))
+    
+ggsave("../output/tih_any.png", units = "in", dpi = 300,  width = 8, height = 6 )
+
+
+
+
+  
+
+in_hospital <-  map(0:90, function(x) {
+  spells %>%
+    filter((ADMIDATE >= x) * (DISDATE<=x) == 1) %>%
+    summarise(n=n_distinct(PERSON_ID_DEID)) %>% 
+    mutate(days=x) }) %>%
+  bind_rows()
+
+totals <- c(
+  deaths = nrow(cohort),
+  withspell = n_distinct(spells$PERSON_ID_DEID))  
+
+risks <- spells %>% 
+  rename(days = ADMIDATE) %>%
+  group_by(days) %>%
+  summarise(em = sum(emergency)) %>%
+  right_join(in_hospital) %>%
+  mutate(
+    atrisk=totals["deaths"] - n,
+    crude = em/totals["deaths"],
+    risk = em/atrisk  )
+  
+ggplot(risks, aes(x=days)) +
+  geom_line(aes(y=crude, colour="crude"))+
+  geom_line(aes(y=risk, colour="risk"))
+
+ggplot(risks %>% filter(days <=100), aes(x=days)) +
+  geom_line(aes(y=crude, colour="crude"))+
+  geom_line(aes(y=risk, colour="risk"))
+
+
+```
+
+```{r set up for analysis, echo = FALSE}
+
+# atrisk
+atrisk1 <- spellsf %>%
+  mutate(
+    PERSON_ID_DEID,
+    tdis = 90 - DISDATE,
+    tadm = 90 - ADMIDATE,
+    .keep = "none") %>%
+  filter(!tadm == tdis) %>%
+  unique() %>%
+  group_by(PERSON_ID_DEID) %>%
+  arrange(PERSON_ID_DEID, tadm, tdis) 
+
+atrisk <- atrisk1 %>%
+  select(PERSON_ID_DEID, tadm, tdis) %>%
+  pivot_longer(
+    cols = c(tadm, tdis),
+    names_prefix = "t",
+    values_to = "t") %>%
+  mutate(atrisk = ifelse(name=="adm", 0,1))
+  
+# emergency admissions
+
+eadm <- spellsf %>%
+  filter(emergency==1) %>%
+  mutate(
+    PERSON_ID_DEID,
+    tadm = 90-ADMIDATE,
+    .keep="none")
+
+# eol_referral
+
+eolref <- c2 %>%
+  filter(!is.na(ref_eol)) %>%
+  mutate(
+    PERSON_ID_DEID,
+    ref_eol,
+    refcat,
+    teol = 90-ref_eol,
+    .keep="none")
+
+
+#initital call
+sdata <-tmerge(
+  c2,
+  c2 %>% mutate(tstart=0, tstop=90),
+  id = PERSON_ID_DEID,
+  end = event(tstop)) 
+
+#eolref  
+sdata <- tmerge(
+  sdata,
+  eolref , 
+  id = PERSON_ID_DEID, 
+  eolref = tdc(teol, init = 0)) 
+
+#emergency admissions
+sdata <- tmerge(sdata, eadm, PERSON_ID_DEID, eadm = event(tadm))
+
+#periods at risk
+sdata_all <- tmerge(sdata, atrisk, PERSON_ID_DEID, atrisk = tdc(t, atrisk, 1))
+
+sdata <- sdata_all %>% filter(atrisk==1)
+
+```
+
+```{r Cox PH analysis, echo = FALSE}
+
+formula <- Surv(tstart, tstop, eadm) ~ eolref + ucod_cat + xage_cat + sex 
+
+surv <- survfit(formula, data = sdata)
+
+model <- coxph(
+  formula, 
+  data = sdata, 
+  cluster = PERSON_ID_DEID, 
+  method = "breslow")
+
+bhaz <- basehaz(model, centered = FALSE) %>% 
+  ggplot(aes(x=time, y=hazard)) +
+  geom_line()
+
+summary_model <- summary(modelf)
+summary_modelt <- broom::tidy(model, exponentiate=TRUE)
+
+phtest <- cox.zph(model)
+print(phtest)
+plot(phtest)
+# ggcoxzph(test)
+
+```
+
+```{r Cox PH analysis Categorise EOLRef, echo = FALSE}
+
+
+sdata2 <- tmerge(
+  sdata,
+  eolref , 
+  id = PERSON_ID_DEID, 
+  eolref_cat = tdc(teol, refcat, init = "None")) 
+
+formula2 <- Surv(tstart, tstop, eadm) ~ eolref_cat + ucod_cat + xage_cat + sex 
+
+model_eolcat <- coxph(
+  formula2, 
+  data =  sdata2, 
+  cluster = PERSON_ID_DEID, 
+  method = "breslow")
+
+
+summary_model_eolcat <- summary(model_eolcat)
+summary_model_eolcat
+
+test_cat <- cox.zph(model_eolcat)
+print(test_cat)
+plot(test_cat)
+#ggcoxzph(test)
+
+```
+
+```{r Cox PH analysis with region, echo = FALSE}
+
+formula3 <- Surv(tstart, tstop, eadm) ~ eolref + ucod_cat + xage_cat + sex + regioncd
+
+model_reg <- coxph(
+  formula3, 
+  data =  sdata, 
+  cluster = PERSON_ID_DEID, 
+  method = "breslow")
+
+
+summary_model_reg <- summary(model_reg)
+summary_model_reg
+
+test_cat <- cox.zph(model_eolcat)
+print(test_cat)
+plot(test_cat)
+#ggcoxzph(test)
+
+```
+
+
+
+```{r last go, echo - FALSE}
+
+formula2b <- Surv(tstart, tstop, eadm) ~ eolref + eolref_cat + ucod_cat + xage_cat + sex 
+
+# This splits the data into timeintervals. The group_modify does this one person at a time
+sdata3 <- sdata2 %>% 
+  group_by(PERSON_ID_DEID) %>%
+  group_modify(~survSplit(formula2b, data=.x, cut=c(30, 60, 76), start = "tstart", end = "tstop", episode = "tgroup"))
+
+
+formula3 <- Surv(tstart, tstop, eadm) ~ eolref_cat:strata(tgroup) + ucod_cat + xage_cat + sex
+
+
+model_eolcat_t <- coxph(
+  formula3, 
+  data =  sdata3, 
+  cluster = PERSON_ID_DEID, 
+  method = "breslow")
+
+
+summary_model_eolcat_t <- summary(model_eolcat_t)
+summary_model_eolcat_t
+
+test_cat_t <- cox.zph(model_eolcat_t)
+print(test_cat_t)
+
+```
+
+```{r output, echo = FALSE}
+
+cohort_desc <- map(
+  c("ucod_cat", "sex", "xage_cat", "refcat"), \(x) {
+
+    c2 %>%
+    rename(value = !!x) %>%
+    group_by(value) %>%
+    summarise(n = n()) %>%
+    mutate(cat=x)
+    
+}) %>%
+bind_rows(
+  spellsf %>%
+    filter(emergency == 1, between(ADMIDATE, -1,90)) %>%
+    mutate(value = cut(ADMIDATE, c(-Inf, refcut, Inf), labels = refint$txt)) %>%
+    group_by(value) %>%
+    summarise(n = n()) %>%
+    mutate(
+      value,
+      n,
+      cat = "Emergency admissions")) %>%
+  select(cat, value, n)
+
+#-------------------------
+
+vnames <- tibble(
+  name = c("eol", "ucod_cat", "xage_cat", "sex"),
+  tidyname = c("EOLC referral",
+              "Underlying cause of death",
+              "Age",
+              "Sex"))
+
+results_model <- broom::tidy(model, exponentiate = TRUE) %>%
+  mutate(
+    group = map(term, \(x) {
+      map(vnames$name, \(y) {
+        ifelse(str_starts(x,y), y, NA)}) %>%
+        unlist() %>%
+        na.omit()}) %>%
+      unlist()
+    ,
+    cat = map(term, \(x) {
+      map(vnames$name, \(y) {
+        ifelse(str_starts(x,y), str_remove(x, y), NA)}) %>%
+        unlist() %>%
+        na.omit()}) %>%
+      unlist()
+    ) %>%
+  left_join(vnames, by = c("group" = "name" )) %>%
+  select(tidyname, cat, estimate, std.error, robust.se, statistic, p.value ) %>%
+  arrange(desc(str_starts(tidyname, "EOL")), desc(str_starts(tidyname, "Sex")), desc(str_starts(tidyname, "Age")), cat) %>%
+  mutate(across(where(is.numeric), ~round(.x,3)))
+
+
+vnames <- vnames %>%
+   mutate(name = ifelse(name=="eol", "eolref_cat", name))
+
+results_model_t <- broom::tidy(model_eolcat, exponentiate = TRUE) %>%
+  mutate(
+    group = map(term, \(x) {
+      map(vnames$name, \(y) {
+        ifelse(str_starts(x,y), y, NA)}) %>%
+        unlist() %>%
+        na.omit()}) %>%
+      unlist()
+    ,
+    cat = map(term, \(x) {
+      map(vnames$name, \(y) {
+        ifelse(str_starts(x,y), str_remove(x, y), NA)}) %>%
+        unlist() %>%
+        na.omit()}) %>%
+      unlist()
+    ) %>%
+  mutate(
+    cat = map(cat, \(x) {
+    ifelse(
+      sum(refint$formal == x) == 0,
+      x,
+      refint$txt[refint$formal == x])}) %>% unlist()) %>%
+  left_join(vnames, by = c("group" = "name" )) %>%
+  select(tidyname, cat, estimate, std.error, robust.se, statistic, p.value ) %>%
+  arrange(desc(str_starts(tidyname, "EOL")), desc(str_starts(tidyname, "Sex")), desc(str_starts(tidyname, "Age")), cat) %>%
+  mutate(across(where(is.numeric), ~round(.x,3)))
+
+results_model_t_cat <- broom::tidy(model_eolcat_t, exponentiate = TRUE) %>% View()
+
+
+write.csv(results_model, "../output/model_plain.csv")
+write.csv(results_model_t, "../output/model_eolcat.csv")
+write.csv(cohort_desc %>% mutate(n = round_f(n)), "../output/cohort.csv")
+
+
+``` 

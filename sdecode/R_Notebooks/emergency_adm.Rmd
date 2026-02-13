@@ -1,0 +1,517 @@
+```{r set up, message=FALSE, warning=FALSE, include=FALSE, warnings=}
+
+library(SparkR)
+library(sparklyr)
+library(DBI)
+library(tidyverse)
+library(dbplyr)
+if (!require(afcharts)) install.packages(afcharts)
+library(afcharts)
+if (!require(openxlsx)) install.packages(openxlsx)
+library(openxlsx)
+
+con <- dbConnect(
+  odbc::odbc(),
+  dsn = 'Databricks',
+  HTTPPath = 'sql/protocolv1/o/8723547585282153/0418-181355-5lqiplri',
+  PWD = rstudioapi::askForPassword('Please enter Databricks PAT')
+)
+
+is.integer64 <- function(x) {class(x)=="integer64"}
+
+round_f <- function(x) {
+  ifelse(
+    x < 10,
+    0,
+    10 * round(x/10)
+    )}
+
+round_ft <- function(x) {
+  y <- round_f(x)
+  ifelse(
+    y ==0,
+    "<10",
+    format(y)
+  )}
+
+aftheme_mod <- function (base_size = 14, base_line_size = base_size/24, base_rect_size = base_size/24, 
+    grid = c("y", "x", "xy", "none"), axis = c("x", "y", "xy", 
+        "none"), ticks = c("xy", "x", "y", "none"), legend = c("right", 
+        "left", "top", "bottom", "none")) 
+{
+    grid <- match.arg(grid)
+    axis <- match.arg(axis)
+    ticks <- match.arg(ticks)
+    legend <- match.arg(legend)
+    light_grey <- "#d9d9d9"
+    afcharts_font <- "sans"
+    half_line <- base_size/2
+    grid_line <- ggplot2::element_line(colour = light_grey)
+    grid_blank <- ggplot2::element_blank()
+    grid_x <- if (grid %in% c("x", "xy")) 
+        grid_line
+    else grid_blank
+    grid_y <- if (grid %in% c("y", "xy")) 
+        grid_line
+    else grid_blank
+    axis_line <- ggplot2::element_line()
+    axis_blank <- ggplot2::element_blank()
+    axis_x <- if (axis %in% c("x", "xy")) 
+        axis_line
+    else axis_blank
+    axis_y <- if (axis %in% c("y", "xy")) 
+        axis_line
+    else axis_blank
+    axis_ticks <- ggplot2::element_line()
+    no_ticks <- ggplot2::element_blank()
+    ticks_x <- if (ticks %in% c("x", "xy")) 
+        axis_ticks
+    else no_ticks
+    ticks_y <- if (ticks %in% c("y", "xy")) 
+        axis_ticks
+    else no_ticks
+    ggplot2::theme(line = ggplot2::element_line(colour = light_grey, 
+        size = base_line_size,  #linewidth = base_line_size, 
+        linetype = 1, lineend = "butt"), 
+        rect = ggplot2::element_rect(fill = "white", colour = "black", 
+            #linewidth = base_rect_size, 
+            size = base_rect_size, 
+            linetype = 1), text = ggplot2::element_text(family = afcharts_font, 
+            face = "plain", colour = "black", size = base_size, 
+            lineheight = 0.9, hjust = 0.5, vjust = 0.5, angle = 0, 
+            margin = ggplot2::margin(), debug = FALSE), axis.line = NULL, 
+        axis.line.x = axis_x, axis.line.y = axis_y, axis.text = NULL, 
+        axis.text.x = ggplot2::element_text(margin = ggplot2::margin(t = 0.8 * 
+            half_line/2), vjust = 1), axis.text.x.top = ggplot2::element_text(margin = ggplot2::margin(b = 0.8 * 
+            half_line/2), vjust = 0), axis.text.y = ggplot2::element_text(margin = ggplot2::margin(r = 0.8 * 
+            half_line/2), hjust = 1), axis.text.y.right = ggplot2::element_text(margin = ggplot2::margin(l = 0.8 * 
+            half_line/2), hjust = 0), axis.ticks = NULL, axis.ticks.x = ticks_x, 
+        axis.ticks.y = ticks_y, axis.ticks.length = ggplot2::unit(half_line/2, 
+            "pt"), axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = half_line/2), 
+            vjust = 1), axis.title.x.top = ggplot2::element_text(margin = ggplot2::margin(b = half_line/2), 
+            vjust = 0), axis.title.y = ggplot2::element_text(angle = 0, 
+            margin = ggplot2::margin(r = half_line/2), vjust = 1, 
+            hjust = 0.5), axis.title.y.right = ggplot2::element_text(angle = 0, 
+            margin = ggplot2::margin(l = half_line/2), vjust = 1, 
+            hjust = 0.5), legend.background = ggplot2::element_rect(colour = NA), 
+        legend.spacing = ggplot2::unit(2 * half_line, "pt"), 
+        legend.margin = ggplot2::margin(half_line, half_line, 
+            half_line, half_line), legend.key = ggplot2::element_rect(fill = NA, 
+            colour = NA), legend.key.size = ggplot2::unit(1.2, 
+            "lines"), legend.text = ggplot2::element_text(size = ggplot2::rel(1)), 
+        legend.text.align = NULL, legend.title = ggplot2::element_text(hjust = 0), 
+        legend.title.align = NULL, legend.position = legend, 
+        legend.direction = NULL, legend.justification = "centre", 
+        legend.box = NULL, legend.box.margin = ggplot2::margin(0, 
+            0, 0, 0, "cm"), legend.box.background = ggplot2::element_blank(), 
+        legend.box.spacing = ggplot2::unit(2 * half_line, "pt"), 
+        panel.background = ggplot2::element_blank(), panel.border = ggplot2::element_blank(), 
+        panel.grid.major.x = grid_x, panel.grid.major.y = grid_y, 
+        panel.grid.minor = ggplot2::element_blank(), panel.spacing = ggplot2::unit(half_line, 
+            "pt"), panel.ontop = FALSE, strip.background = ggplot2::element_blank(), 
+ #       strip.clip = "inherit", strip.text = ggplot2::element_text(margin = ggplot2::margin(0.8 * 
+#            half_line, 0.8 * half_line, 0.8 * half_line, 0.8 * 
+#            half_line)), strip.text.y = ggplot2::element_text(angle = -90), 
+        strip.text.y.left = ggplot2::element_text(angle = 90), 
+        strip.placement = "inside", strip.switch.pad.grid = ggplot2::unit(half_line/2, 
+            "pt"), strip.switch.pad.wrap = ggplot2::unit(half_line/2, 
+            "pt"), plot.background = ggplot2::element_rect(colour = "white"), 
+        plot.title = ggplot2::element_text(size = ggplot2::rel(1.6), 
+            hjust = 0, vjust = 1, margin = ggplot2::margin(b = half_line * 
+                2)), plot.title.position = "panel", plot.subtitle = ggplot2::element_text(hjust = 0, 
+            vjust = 1, margin = ggplot2::margin(b = half_line * 
+                2)), plot.caption = ggplot2::element_text(size = ggplot2::rel(1), 
+            hjust = 0, vjust = 1, margin = ggplot2::margin(t = half_line)), 
+        plot.caption.position = "panel", plot.tag = ggplot2::element_text(size = ggplot2::rel(1.2), 
+            hjust = 0.5, vjust = 0.5), plot.tag.position = "topleft", 
+        plot.margin = ggplot2::margin(half_line, half_line, half_line, 
+            half_line), complete = TRUE)}
+
+
+
+
+```
+
+```{r cohort_reminder, echo = FALSE}
+
+tbl(con, sql("
+    SELECT 
+      COUNT(*) AS dths,
+      yod
+    FROM hive_metastore.dsa_484452_h8s1l_collab.peolc_deaths_cohort
+    WHERE LSOA11 LIKE 'E%'
+    GROUP BY yod
+    ORDER BY yod")) %>%
+  collect() 
+
+```
+
+
+
+```{r apc_spells, echo = FALSE}
+
+dths <- tbl(con, sql("
+  SELECT DISTINCT DEC_CONF_NHS_NUMBER_CLEAN_DEID AS PERSON_ID_DEID, dod, yod,eol_pod, ucod_cat 
+  FROM  hive_metastore.dsa_484452_h8s1l_collab.peolc_deaths_cohort
+  WHERE LSOA11 LIKE 'E%' ")) 
+
+apc_raw <- tbl(con, sql("
+  SELECT dth.PERSON_ID_DEID,
+  ADMIDATE,
+  DISDATE,
+  ADMIMETH,
+  ADMISORC,
+  DISDEST,
+  DISMETH,
+  SPELDUR,
+  DATEDIFF(DOD, ADMIDATE) AS days_adm_dod,
+  DATEDIFF(DOD, DISDATE) AS days_dis_dod,
+  dod,
+  yod,
+  eol_pod,
+  ucod_cat,
+  if(SUBSTR(ADMIMETH,1,1) ='2',TRUE,FALSE) AS em_adm 
+  FROM 
+  hive_metastore.dsa_484452_h8s1l_collab.daps_hes_apc_spells_all_years AS hes
+  INNER JOIN (
+    SELECT DEC_CONF_NHS_NUMBER_CLEAN_DEID AS PERSON_ID_DEID , dod, yod,eol_pod, ucod_cat 
+    FROM  hive_metastore.dsa_484452_h8s1l_collab.peolc_deaths_cohort
+    WHERE LSOA11 LIKE 'E%') AS dth
+  ON hes.PERSON_ID_DEID = dth.PERSON_ID_DEID
+  WHERE (DATEDIFF(dod,DISDATE) <=365) "))
+
+apc_raw %>%
+  group_by(yod) %>%
+  summarise(people=n_distinct(PERSON_ID_DEID)) %>% 
+  collect()
+
+apc_raw %>%
+  head(5) %>%
+  collect()
+
+csds_raw <- tbl(con, sql("
+  WITH c1 AS (
+    SELECT 
+      PERSON_ID_DEID,
+      ReferralRequest_ReceivedDate,
+      datediff(dod,ReferralRequest_ReceivedDate) days_bf_eol,
+      CASE 
+        WHEN Pseudo_PrimaryReferralReason = '026'
+            OR Pseudo_ReferralReason_Other LIKE '%026%'
+            OR TeamType = 14 THEN 1
+        ELSE 0 END AS eol_referral,
+      AccommStatus
+    FROM hive_metastore.dsa_484452_h8s1l_collab.peolc_csds_ref
+    WHERE datediff(dod,ReferralRequest_ReceivedDate) BETWEEN 0 AND  365 )
+  ,
+  ceol AS (
+    SELECT
+      PERSON_ID_DEID,
+      days_bf_eol,
+      ROW_NUMBER() OVER( PARTITION BY PERSON_ID_DEID ORDER BY ReferralRequest_ReceivedDate ASC, eol_referral DESC) AS rown
+    FROM c1
+    WHERE eol_referral=1
+  )
+  ,
+  cany AS (
+    SELECT
+      PERSON_ID_DEID,
+      days_bf_eol,
+      AccommStatus,
+      ROW_NUMBER() OVER( PARTITION BY PERSON_ID_DEID ORDER BY ReferralRequest_ReceivedDate ASC) AS rown
+      FROM c1
+  )
+
+SELECT DISTINCT
+  c1.PERSON_ID_DEID,
+  CASE 
+    WHEN cany.PERSON_ID_DEID IS NULL THEN 'None'
+    WHEN ceol.PERSON_ID_DEID IS NULL THEN 'Ref no eol'
+    ELSE 'Ref eol'
+    END AS referral,
+  ceol.days_bf_eol AS first_eol_ref,
+  cany.days_bf_eol  AS first_ref,
+  cany.AccommStatus
+FROM 
+c1 
+LEFT JOIN ceol ON c1.PERSON_ID_DEID = ceol.PERSON_ID_DEID
+LEFT JOIN cany ON c1.PERSON_ID_DEID = cany.PERSON_ID_DEID
+WHERE (ceol.PERSON_ID_DEID IS NULL OR ceol.rown=1)
+  AND (cany.PERSON_ID_DEID IS NULL OR cany.rown=1)
+"))
+   
+
+
+
+csds_raw %>%
+  head(5) %>%
+  collect()
+
+csds_raw %>%
+  filter(!is.na(first_eol_ref)) %>%
+  group_by(first_eol_ref) %>%
+  summarise(people=n(), .groups = "drop") %>%
+  mutate( p = people/sum(people)) %>%
+  collect() %>%
+ 
+  arrange(first_eol_ref) %>%
+  mutate(pc_cum = cumsum(p)) %>%
+  ggplot(aes(x=first_eol_ref, y=pc_cum)) +
+  geom_line() +
+  labs(title = "When people first have an eol referral")
+
+
+
+apc_raw %>%
+  group_by(yod) %>%
+  summarise(
+    people = n_distinct(PERSON_ID_DEID),
+    adm = n()) %>%
+  arrange(yod) %>%
+  collect()
+
+```
+
+```{r em_adm, echo = FALSE}
+
+adm_f <- function(x, emergency=FALSE, start =30, stop=0) {
+
+  if (emergency) x <- filter(x, em_adm == TRUE)
+  
+  x %>%
+    mutate(adm = case_when(
+      between(days_adm_dod, stop, start) ~ 1,
+      TRUE ~ 0)) %>%
+    group_by(PERSON_ID_DEID) %>%
+    summarise(
+      adm=sum(adm),
+      .groups = "drop") }
+
+days_f <- function(x, emergency=FALSE, start =30, stop=0) {
+
+  if (emergency) x <- filter(x, em_adm == TRUE)
+  
+  x %>%
+    mutate(days = case_when(
+      days_dis_dod  > start | days_adm_dod < stop ~ 0,
+      TRUE ~ ifelse(start < days_adm_dod, start , days_adm_dod) - ifelse(stop > days_dis_dod, stop , days_dis_dod))) %>%
+    group_by(PERSON_ID_DEID) %>%
+    summarise(
+      days=sum(days),
+      .groups = "drop") }
+    
+
+apc_person_summary <- apc_raw %>%
+  select(
+    PERSON_ID_DEID,
+    dod,
+    yod,
+    eol_pod,
+    ucod_cat) %>%
+  distinct() %>%
+  left_join(adm_f(x= apc_raw,  emergency=FALSE , start = 30, stop=0) %>% rename(adm30 = adm)) %>%
+  left_join(adm_f(x= apc_raw,  emergency=TRUE , start = 30, stop=0) %>% rename(eadm30 = adm)) %>%
+  left_join(days_f(x= apc_raw,  emergency=FALSE , start = 30, stop=0) %>% rename(days30 = days)) %>%
+  left_join(days_f(x= apc_raw,  emergency=TRUE , start = 30, stop=0) %>% rename(edays30 = days)) %>%
+  left_join(adm_f(x= apc_raw,  emergency=FALSE , start = 60, stop=31) %>% rename(adm60 = adm)) %>%
+  left_join(adm_f(x= apc_raw,  emergency=TRUE , start = 60, stop=31) %>% rename(eadm60 = adm)) %>%
+  left_join(days_f(x= apc_raw,  emergency=FALSE , start = 60, stop=31) %>% rename(days60 = days)) %>%
+  left_join(days_f(x= apc_raw,  emergency=TRUE , start = 60, stop=31) %>% rename(edays60 = days)) %>%
+  left_join(adm_f(x= apc_raw,  emergency=FALSE , start = 90, stop=61) %>% rename(adm90 = adm)) %>%
+  left_join(adm_f(x= apc_raw,  emergency=TRUE , start = 90, stop=61) %>% rename(eadm90 = adm)) %>%
+  left_join(days_f(x= apc_raw,  emergency=FALSE , start = 90, stop=61) %>% rename(days90 = days)) %>%
+  left_join(days_f(x= apc_raw,  emergency=TRUE , start = 90, stop=61) %>% rename(edays90 = days))
+
+ apc_person_summary %>%
+   head(500) %>% 
+   collect() %>% View()
+
+ 
+ chk <- apc_person_summary %>%
+   mutate(eadm_tot = eadm30 + eadm60 + eadm90) %>%
+   group_by(ucod_cat, eadm_tot) %>%
+   summarise(people = n()) %>%
+   collect() %>%
+   group_by(ucod_cat) %>%
+   mutate(den = sum(people), 
+          pc = 100*people/den)
+   
+chk %>%
+  ggplot(aes(x=eadm_tot, y=pc)) +
+  geom_line() +
+  facet_wrap(~ucod_cat)
+  
+chk %>%
+  group_by(ucod_cat) %>%
+  summarise(e3 = sum(pc[!is.na(eadm_tot) & eadm_tot>=3]))
+  
+  
+```
+
+```{r combine, echo = FALSE}
+
+combine <- left_join(dths , 
+                     apc_person_summary %>%
+                       select(PERSON_ID_DEID, 
+                              adm30, eadm30, days30, edays30,
+                              adm60, eadm60, days60, edays60,
+                              adm90, eadm90, days90, edays90,)
+                       , by = c("PERSON_ID_DEID")) %>%
+  left_join(csds_raw, by = c("PERSON_ID_DEID"))
+
+# result <- combine %>% collect() 
+
+summary <- combine %>%
+  mutate(
+    across(starts_with("eadm"), ~ifelse(is.na(.),0,.)),
+    eadm = eadm30 + eadm60 + eadm90,
+    eadm30_any = case_when(
+      eadm30==0 ~ FALSE,
+      eadm30>0 ~TRUE ),
+    eadm60_any = case_when(
+      eadm60==0 ~ FALSE,
+      eadm60>0 ~TRUE ),
+    eadm90_any = case_when(
+      eadm90==0 ~ FALSE,
+      eadm90>0 ~TRUE ),
+    eol_ref = case_when(
+      is.na(first_eol_ref) ~ "None",
+      first_eol_ref<=30 ~ "0-30",
+      between(first_eol_ref, 31, 60) ~ "31-60",
+      between(first_eol_ref, 61, 90) ~ "60-90",
+      first_eol_ref > 90 ~ "90+",
+      TRUE ~"err") ) %>%
+  group_by(yod, eol_pod, ucod_cat, referral, eadm,
+            eadm30, eadm60, eadm90, eadm30_any, eadm60_any, eadm90_any, eol_ref ) %>%
+  summarise(
+    count = n(),
+    ndays30_0 = sum(case_when(
+      is.na(days30) ~ 1,
+      days30 == 0 ~ 1,
+      days30 > 0 ~ 0)),
+    ndays60_0 = sum(case_when(
+      is.na(days60) ~ 1,
+      days60 == 0 ~ 1,
+      days60 > 0 ~ 0)),
+    ndays90_0 = sum(case_when(
+      is.na(days90) ~ 1,
+      days90 == 0 ~ 1,
+      days90 > 0 ~ 0)),
+    days30 = sum(days30),
+    days60 = sum(days60),
+    days90 = sum(days90)) %>%
+  collect() %>%
+  mutate(
+    across(where(is.integer64), as.integer),
+    referral = ifelse(referral=="Ref no eol", "non eol_ref only", eol_ref))
+  
+
+```
+
+A very crude analysis:
+The mean number emergency adm per person during last 90 days.
+
+
+```{r em_adm2, echo = FALSE}
+
+# cw pattern of care
+
+summary %>%
+  group_by(yod, ucod_cat) %>%
+#  mutate(
+#    across(starts_with(c("eadm", "days")), ~replace_na(.,0)) ) %>%
+   summarise(
+    dths = sum(count),
+    eadm_tot = sum(eadm * count) ,
+    eadm3p = sum((eadm>=3) * count),
+    tih = sum(days30 + days60 + days90),
+    .groups = "drop") %>%
+  arrange(desc(yod), ucod_cat)
+    
+stats1 <- summary %>%
+  group_by(ucod_cat, referral, yod) %>%
+  summarise(
+    dths = sum(count),
+    dths_eadm3p = sum((eadm >=3) * count),
+    eadm30 = sum(ifelse(is.na(eadm30),0,eadm30) * count),
+    eadm60 = sum(ifelse(is.na(eadm60),0,eadm60) * count),
+    eadm90 = sum(ifelse(is.na(eadm90),0,eadm90) * count),
+    pod_hosp = sum((eol_pod=="Hospital")*count),
+    tih30 = sum(ifelse(is.na(days30), 0, days30)),
+    tih60 = sum(ifelse(is.na(days60), 0, days60)),
+    tih90 = sum(ifelse(is.na(days90), 0, days90)),
+    neadm30_any = sum(eadm30_any * count),
+    neadm60_any = sum(eadm60_any * count),
+    neadm90_any = sum(eadm90_any * count),
+    ndays30_any = sum((days30>0) * count),
+    ndays60_any = sum((days60>0) * count),
+    ndays90_any = sum((days90>0) * count),
+    .groups = "drop")
+
+stats2 <- stats1 %>%
+  mutate(
+    ucod_cat,
+    referral,
+    yod,
+    dths,
+    stat_3eadm_p = dths_eadm3p / dths, 
+    stat_p_eadm30_any = neadm30_any / dths,
+    stat_mean_eadm30 = eadm30/dths,
+#    stat_mean_eadm30_2 = eadm30/neadm30_any,
+    stat_p_days30_0 = (dths - ndays30_any) / dths,
+#    stat_p_tih30 = tih30/(dths * 30),
+    stat_p_tih30_2 = tih30/(ndays30_any*30),
+    stat_pHosp = pod_hosp/dths,
+    .keep="none"    )
+
+#use_afcharts()
+
+charts <- map(unique(stats2$ucod_cat) %>% set_names(),
+    function(ucod) {
+    tmp <- 
+      stats2 %>%
+        filter(ucod_cat==ucod & yod==2024) %>%
+#        select(-c(dths, eadm30, eadm30_any, pod_hosp)) %>%
+        pivot_longer(cols = starts_with("stat")) %>%
+        mutate(name = factor(
+          name,
+          levels = c(
+            "stat_p_eadm30_any",
+            "stat_3eadm_p",
+            "stat_mean_eadm30",
+            "stat_mean_eadm30_2",
+            "stat_pHosp",
+            "stat_p_days30_0",
+            "stat_p_tih30",
+            "stat_p_tih30_2"),
+          labels = c(
+            "Proportion with emergency admission in last 30 days",
+            "Proportion with 3+ emergency adm",
+            "Mean number of emergency admissions in last 30 days",
+            "Mean number of emergency admissions in last 30 days (people with 1+ eadm)",
+            "Proportion of deaths in hospital",
+            "Proportion with no hospital stay in last 90 days",
+            "Proportion of last 30 days spent in hospital",
+            "Proportion of last 30 days spent in hospital (people with 1+ days")
+          ) %>%
+            str_wrap(width=19)) 
+      
+   #   map(unique(tmp$name) %>% set_names(),
+  #        function(stat) {
+  #          tmp %>%
+  #            filter(name==stat) %>%
+        tmp %>%      ggplot(aes(x=referral, y=value, fill = referral)) +
+              geom_col() +
+#              labs(
+#                title = stat # paste0(stat, "(", ucod, ")")
+#              ) +
+        facet_wrap(~name, scales = "free_y") +
+              aftheme_mod() +
+              theme(
+                axis.text.x = element_blank(),
+                axis.title.y = element_blank()) +
+          labs(title=ucod)
+#        )})
+        })
+
+``` 

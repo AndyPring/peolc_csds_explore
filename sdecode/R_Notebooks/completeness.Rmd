@@ -1,0 +1,225 @@
+```{r set up, message=FALSE, warning=FALSE, include=FALSE}
+
+library(SparkR)
+library(sparklyr)
+library(DBI)
+library(tidyverse)
+library(dbplyr)
+if(!require(PHEindicatormethods)) install.packages("PHEindicatormethods", repos = "https://packages.sde.digital.nhs.uk/repository/cran-mirror/", dependencies = TRUE)
+library(PHEindicatormethods)
+if (!require(afcharts)) install.packages('afcharts')
+library(afcharts)
+if (!require(openxlsx)) install.packages('openxlsx')
+library(openxlsx)
+library(afcharts)
+
+con <- dbConnect(
+  odbc::odbc(),
+  dsn = 'Databricks',
+  HTTPPath = 'sql/protocolv1/o/8723547585282153/0418-181355-5lqiplri',
+  PWD = rstudioapi::askForPassword('Please enter Databricks PAT')
+)
+
+is.integer64 <- function(x) {class(x)=="integer64"}
+
+round_f <- function(x) {
+  ifelse(
+    x < 10,
+    0,
+    10 * round(x/10)
+    )}
+
+round_ft <- function(x) {
+  y <- round_f(x)
+  ifelse(
+    y ==0,
+    "<10",
+    format(y)
+  )}
+```
+```{sql, connection = con, output.var = dths_summary}
+
+  SELECT xage_cat, ucod_cat, COUNT(*) AS dths
+  FROM hive_metastore.dsa_484452_h8s1l_collab.peolc_deaths_cohort AS d
+  WHERE yod = 2024
+  GROUP BY xage_cat, ucod_cat
+
+```
+
+```{r dth_table, echo = FALSE}
+
+dth_summary %>%
+#  group_by(x_age_cat, ucod_cat) %>%
+#  summarise( dths = SUM(dths)) %>%
+  pivot_wider(
+    id_cols = ucod_cat,
+    names_from = xage_cat,
+    values_from = dths,
+    values_fn = ~sum(as.integer(.x)))
+  
+```
+```{sql, connection = con, output.var = referral_summary}
+WITH ref AS (
+  SELECT d.DEC_CONF_NHS_NUMBER_CLEAN_DEID AS PERSON_ID_DEID,
+    d.xage_cat, d.ucod_cat,
+    CASE WHEN d.eol_pod = 'Hospital' THEN 'Hospital' ELSE 'xHospital' END AS pod,
+    CASE 
+        WHEN Pseudo_PrimaryReferralReason = '026'
+            OR Pseudo_ReferralReason_Other LIKE '%026%'
+            OR TeamType IN (14, 47) THEN 2    -- EOL referral
+        WHEN r.PERSON_ID_DEID IS NULL THEN 0  -- No referrals
+        ELSE 1                                -- referral, not EOL
+        END AS ref_eol
+  FROM hive_metastore.dsa_484452_h8s1l_collab.peolc_csds_ref AS r
+  RIGHT JOIN hive_metastore.dsa_484452_h8s1l_collab.peolc_deaths_cohort d
+  ON r.PERSON_ID_DEID = d.DEC_CONF_NHS_NUMBER_CLEAN_DEID
+  WHERE d.yod = 2024)
+  ,
+  person AS (
+  SELECT PERSON_ID_DEID, xage_cat, ucod_cat, pod, max(ref_eol) AS ref_eol
+  FROM ref
+  GROUP BY PERSON_ID_DEID, xage_cat, ucod_cat, pod)
+  
+  SELECT  
+    xage_cat, ucod_cat, pod, ref_eol,
+    COUNT(*) AS dths
+  FROM person
+  GROUP BY xage_cat, ucod_cat, pod, ref_eol
+
+```
+
+```{r clean_ref, echo = FALSE}
+referral_summary <- referral_summary %>%
+  mutate(across(where(is.integer64), as.integer)) %>%
+  arrange(ucod_cat, xage_cat)
+
+referral_summary %>% View()
+```
+
+```{r ref_table, echo = FALSE}
+
+table_ref <- referral_summary %>%
+  group_by(xage_cat, ucod_cat) %>%
+  summarise(
+    dthsall = sum(dths),
+    any_ref = sum(dths[ref_eol>0]),
+    eol_ref = sum(dths[ref_eol==2]),
+    hospital_all = sum(dths[pod=="Hospital"]),
+    hospital_any = sum(dths[pod=="Hospital" & ref_eol > 0]),
+    hospital_eol = sum(dths[pod=="Hospital" & ref_eol == 2]),
+    .groups = "drop")
+
+table_ref2 <- table_ref %>%
+  mutate(
+    ucod_cat, xage_cat, 
+    dths = dthsall,
+    ref_pc_any = 100 * any_ref/dthsall,
+    ref_pc_eol = 100 * eol_ref/dthsall,
+    pod_hospital_all = 100 * hospital_all / dthsall,
+    pod_hospital_any = 100 * hospital_any / any_ref,
+    pod_hospital_eol = 100 * hospital_eol / eol_ref,
+    .keep = "none") %>%
+  arrange(ucod_cat, xage_cat)
+
+table_ref2 %>%
+  pivot_longer(
+    cols = c(ref_pc_any, ref_pc_eol),
+    names_prefix = "ref_pc_") %>%
+  ggplot(
+    aes(x = xage_cat, y= value, fill = name), ) +
+    geom_col(position="dodge") +
+    facet_wrap(~ucod_cat)+
+  labs(title = "Percentage of deaths with recorded community service referrals")
+
+table_ref2 %>%
+  pivot_longer(
+    cols = c(pod_hospital_all, pod_hospital_any, pod_hospital_eol),
+    names_prefix = "pod_hospital_") %>%
+  ggplot(
+    aes(x = xage_cat, y= value, fill = name), ) +
+    geom_col(position="dodge") +
+    facet_wrap(~ucod_cat) +
+  labs(title = "Percentage of deaths in hospital")
+  
+```
+```{r ref_whatif, echo=FALSE}
+
+table_ref %>%
+  mutate(
+    ucod_cat, xage_cat,
+    dthsall, 
+    dths_xeol = dthsall-eol_ref,
+    dih_eol = hospital_eol/eol_ref,
+    change = round(hospital_all - (dthsall * dih_eol)), 
+    .keep = "none") %>%
+  ggplot(aes(y=ucod_cat, x=change, fill=xage_cat)) +
+  geom_col(psition="stack")
+
+```  
+
+
+
+
+
+```{sql, connection = con, output.var = extract}
+
+WITH extract AS (
+SELECT COUNT(DISTINCT Person_ID_DEID) AS people, TeamType, d.UTLA, d.dths, length(TeamType) l
+FROM hive_metastore.dsa_484452_h8s1l_collab.peolc_csds_ref r
+RIGHT JOIN (
+  SELECT UTLA, COUNT(*) AS dths 
+  FROM hive_metastore.dsa_484452_h8s1l_collab.peolc_deaths_cohort
+  GROUP BY UTLA) d ON r.UTLA = d.UTLA
+WHERE yod = 2024
+GROUP BY TeamType, length(TeamType) , d.UTLA, d.dths)
+,
+england AS (
+  SELECT 
+  TeamType,
+  SUM(people) AS people_Eng,
+  SUM(dths) AS dths_Eng
+  FROM extract
+  WHERE l = 2 
+  GROUP BY TeamType)
+
+  SELECT 
+  e.TeamType,
+  e.people_Eng,
+  e.dths_Eng,
+  100 * people_Eng /dths_Eng AS rate_e,
+  l.UTLA,
+  l.people,
+  l.dths,
+  100 * people /dths AS rate_l,
+  (people /dths) / (people_Eng /dths_Eng) AS ratio
+  FROM england e LEFT JOIN extract l  ON e.teamtype = l.teamtype
+  WHERE l.l=2
+  ORDER BY e.teamtype;
+```
+
+```{r order, echo = FALSE}
+crude_look <- extract %>%
+  mutate(across(where(is.integer64), as.integer)) %>%
+  mutate(
+  upper = 100*(people + 2 * sqrt(people))/dths,
+  lower = 100*(people - 2 * sqrt(people))/dths,
+  upper_e = 100*(people_Eng + 2 * sqrt(people_Eng))/dths_Eng,
+  lower_e = 100*(people_Eng - 2 * sqrt(people_Eng))/dths_Eng,
+  compare = case_when(
+    lower > upper_e ~ "H",
+    upper < lower_e ~ "L",
+    is.na(people) ~ "NA",
+    T ~ "No diff")
+  )
+
+crude_look %>%
+  select(TeamType, people_Eng, UTLA, compare) %>%
+  pivot_wider(
+    id_cols = c(TeamType, people_Eng),
+    names_from = UTLA,
+    values_from = compare) %>%
+  arrange(desc(people_Eng)) %>%
+  View()
+  
+```
+   

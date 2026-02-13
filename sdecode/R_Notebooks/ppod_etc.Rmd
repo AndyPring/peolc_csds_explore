@@ -1,0 +1,87 @@
+---
+title: "Diagnoses"
+output: html_notebook
+---
+
+```{r setup, echo = FALSE}
+library(SparkR)
+library(sparklyr)
+library(DBI)
+library(tidyverse)
+library(dbplyr)
+if(!require(janitor)) install.packages("janitor")
+library(janitor)
+library(survival)
+#source("aftheme_mod.R")
+
+# if(!require(PHEindicatormethods)) install.packages("PHEindicatormethods", repos = "https://packages.sde.digital.nhs.uk/repository/cran-mirror/", dependencies = TRUE)
+# library(PHEindicatormethods)
+#if (!require(afcharts)) install.packages('afcharts')
+#library(afcharts)
+#if (!require(openxlsx)) install.packages('openxlsx')
+#library(openxlsx)
+#if (!require(svglite)) install.packages('svglite')
+#library(svglite)
+
+#library(afcharts)
+
+con <- dbConnect(
+odbc::odbc(),
+dsn = 'databricks',
+HTTPPath = 'sql/protocolv1/o/8723547585282153/1007-063142-dtxq2zhk',
+PWD = rstudioapi::askForPassword('Please enter Databricks PAT'))
+
+#############################
+spellsdays <- 365
+h_spc_days <- 365
+period <- 90
+#############################
+
+is.integer64 <- function(x) {class(x)=="integer64"}
+
+round_f <- function(x) {
+  ifelse(
+    x < 10,
+    0,
+    10 * round(x/10)
+    )}
+
+round_ft <- function(x) {
+  y <- round_f(x)
+  ifelse(
+    y ==0,
+    "<10",
+    format(y)
+  )}
+```
+
+```{sql eol_ind, connection=con, output.var=ref_eolind}
+
+SELECT DISTINCT
+  PERSON_ID_DEID, 
+  DATEDIFF(dod, ReferralRequest_ReceivedDate) date_rrrd_dth,
+  DiscussedPreferredDeathLocation_Indicator, 
+  RiskOfUnexpectedDeath_Indicator,
+  TeamType,
+  Pseudo_PrimaryReferralReason,
+  Pseudo_ReferralReason_Other
+FROM dsa_484452_h8s1l_collab.peolc_csds_ref
+WHERE yod = 2024
+
+```
+
+```{r ref_eol_sum}
+
+ref_eolind %>%
+  filter(DiscussedPreferredDeathLocation_Indicator %in% c("1", "Y") & date_rrrd_dth<=365) %>%
+  group_by(PERSON_ID_DEID) %>%
+  summarise(d_ppod = max(date_rrrd_dth)) %>%
+  ungroup() %>%
+#  filter(d_ppod<100) %>%
+  ggplot(aes(x=d_ppod)) +
+  geom_bar()
+
+# ref_eolind$RiskOfUnexpectedDeath_Indicator %>% table()
+
+
+``` 

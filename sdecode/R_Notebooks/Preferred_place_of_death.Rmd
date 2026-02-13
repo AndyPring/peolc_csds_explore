@@ -1,0 +1,460 @@
+---
+title: "Preferred place of death"
+output: html_notebook
+---
+
+To explore the question, Is "preferred place of death" more likley to be recorded if people have "End of life care" as the reason for referral ?
+
+## Method notes
+
+Deaths occurring 2020-2024
+In an attempt to filter for people most likely to benefit from EOLC, exclude deaths from externals causes etc
+
+### EOLC referrals
+
+We categorise EOLC referrals if:
+
+* reason for referral is EOLC
+* other reasons for referal include EOLC
+* referral is made to an EOLC team
+
+### Preferred place of death
+
+There is a choice here between 2 fields
+
+* DiscussedPreferredDeathLocation_Indicator (Y/N) or
+* DeathLocationPreferred_Type ( 0 for null or blank 0 99 (not discussed), 1 for any other valid code)
+
+they arent always consistent
+
+
+```{r set up, message=FALSE, warning=FALSE, include=FALSE, warnings=}
+
+library(SparkR)
+library(sparklyr)
+library(DBI)
+library(tidyverse)
+library(dbplyr)
+if !(require(afcharts)) install.packages(afcharts)
+library(afcharts)
+if (!require(openxlsx)) install.packages(openxlsx)
+library(openxlsx)
+
+con <- dbConnect(
+  odbc::odbc(),
+  dsn = 'Databricks',
+  HTTPPath = 'sql/protocolv1/o/8723547585282153/0418-181355-5lqiplri',
+  PWD = rstudioapi::askForPassword('Please enter Databricks PAT')
+)
+
+is.integer64 <- function(x) {class(x)=="integer64"}
+
+round_f <- function(x) {
+  ifelse(
+    x < 10,
+    0,
+    10 * round(x/10)
+    )}
+
+round_ft <- function(x) {
+  y <- round_f(x)
+  ifelse(
+    y ==0,
+    "<10",
+    format(y)
+  )}
+
+
+
+```
+
+```{r get_some_data, echo=FALSE}
+
+ppod_data <- tbl(con, sql("
+
+  SELECT 
+    dth.DEC_CONF_NHS_NUMBER_CLEAN_DEID,
+    IFF(ref.PERSON_ID_DEID IS NULL, 0,1) AS referrals,
+    max(DiscussedPreferredDeathLocation_Indicator IN ('Y','1')) discussed_ppod,
+    max(ppod_valid) AS ppod_valid,
+    max(eol_referral) AS eol_referral,
+    ucod_cat,
+    eol_pod,
+    yod
+    
+  FROM  
+
+  (SELECT DISTINCT
+    Person_ID_DEID,
+    DiscussedPreferredDeathLocation_Indicator,
+    CASE
+      WHEN DeathLocationPreferred_Type IS NULL  OR DeathLocationPreferred_Type IN('', '99') THEN 0
+      ELSE 1 END AS ppod_valid,
+    CASE 
+      WHEN Pseudo_PrimaryReferralReason = '026'
+          OR Pseudo_ReferralReason_Other LIKE '%026%'
+          OR TeamType = 14 THEN 1
+      ELSE 0 END AS eol_referral
+  FROM dsa_484452_h8s1l_collab.peolc_csds_ref) ref
+  
+  RIGHT JOIN 
+  
+  (SELECT 
+    DEC_CONF_NHS_NUMBER_CLEAN_DEID,
+    eol_pod,
+    ucod_cat,
+    yod
+  FROM dsa_484452_h8s1l_collab.peolc_deaths_cohort
+  WHERE ucod_cat <> 'Other') dth
+                          
+  ON ref.Person_ID_DEID = dth.DEC_CONF_NHS_NUMBER_CLEAN_DEID
+  
+  GROUP BY 
+    dth.DEC_CONF_NHS_NUMBER_CLEAN_DEID,
+    IFF(ref.PERSON_ID_DEID IS NULL, 0,1),
+    ucod_cat,
+    eol_pod,
+    yod"))
+
+
+tbl2 <- tbl(con, sql("
+  SELECT
+    PERSON_ID_DEID,
+    DiscussedPreferredDeathLocation_Indicator,
+    DeathLocationPreferred_Type
+  FROM dsa_484452_h8s1l_collab.peolc_csds_ref
+  WHERE (
+    DiscussedPreferredDeathLocation_Indicator IS NOT NULL 
+    AND DeathLocationPreferred_Type IS NOT NULL)
+  ORDER BY PERSON_ID_DEID
+  LIMIT 1000
+  ")) %>% 
+  collect()
+
+
+ppod_eolpod <- tbl(con, sql("
+WITH ref1 AS (
+  SELECT DISTINCT
+    Person_ID_DEID,
+    ReferralRequest_ReceivedDate,
+    CASE WHEN DeathLocationPreferred_Type IS NOT NULL OR DeathLocationPreferred_Type IN('', '99') THEN  0 ELSE  1 END  AS good_ppod,
+    DeathLocationPreferred_Type
+  FROM dsa_484452_h8s1l_collab.peolc_csds_ref
+)
+,
+ref2 AS (
+    SELECT 
+      Person_ID_DEID,
+      DeathLocationPreferred_Type,
+      good_ppod,
+      ROW_NUMBER() OVER (PARTITION BY Person_ID_DEID ORDER BY good_ppod DESC, ReferralRequest_ReceivedDate DESC) AS rown
+    FROM ref1)
+,
+ref3 AS (
+    SELECT 
+      Person_ID_DEID,
+      DeathLocationPreferred_Type,
+      good_ppod
+    FROM ref2
+    WHERE rown = 1)
+, 
+dths AS ( 
+  SELECT 
+    DEC_CONF_NHS_NUMBER_CLEAN_DEID,
+    eol_pod,
+    ucod_cat,
+    yod
+  FROM dsa_484452_h8s1l_collab.peolc_deaths_cohort)
+
+SELECT 
+  COUNT(*) dths,
+    CASE WHEN PERSON_ID_DEID IS NULL THEN 0  ELSE 1 END AS referral,
+    DeathLocationPreferred_Type,
+    good_ppod,
+    ucod_cat,
+    eol_pod,
+    yod
+    
+FROM  dths
+LEFT JOIN ref3
+ON  ref3.Person_ID_DEID = dths.DEC_CONF_NHS_NUMBER_CLEAN_DEID
+GROUP BY 
+  CASE WHEN PERSON_ID_DEID IS NULL THEN 0  ELSE 1 END,
+  DeathLocationPreferred_Type,
+  good_ppod,
+  ucod_cat,
+  eol_pod,
+  yod
+")) %>%
+collect() %>%
+mutate(dths = as.integer(dths))
+
+
+
+
+```
+
+```{r descriptive analysis ppod, echo=, warning=FALSE}
+
+chk_ppodInd <- ppod_data %>%
+  filter(referrals == 1) %>%
+  group_by(ppod_valid, discussed_ppod) %>%
+  summarise(dths = n()) %>%
+  collect() %>%
+  arrange(ppod_valid, discussed_ppod)
+
+summary_ppod <- ppod_data %>%
+  group_by(referrals, ppod_valid, discussed_ppod, eol_referral, ucod_cat, eol_pod, yod) %>%
+  summarise(dths = n()) %>%
+  collect() %>% 
+  mutate(
+    dths = as.integer(dths),
+    ppod = (replace_na(ppod_valid,0) == 1)|(replace_na(discussed_ppod,0) == 1),
+    eol_referral=replace_na(eol_referral,0))
+
+ppodtable <- function(x) {
+  x %>% summarise(
+    all_deaths=sum(dths),
+    with_referrals=sum(referrals * dths),
+    with_eol_referral = sum(dths * eol_referral),
+    with_ppod = sum(dths * ppod),
+    with_eol_referral_and_ppod = sum(dths * ppod * eol_referral),
+    pc_ppod = 100 * with_ppod/with_referrals,
+    pc_ppod_eol = 100 * with_eol_referral_and_ppod / with_eol_referral,
+    pc_ppod_Xeol = 100 * (with_ppod - with_eol_referral_and_ppod) /(with_referrals - with_eol_referral),
+    ratio = pc_ppod_eol / pc_ppod_Xeol )
+}
+
+summary_year <- summary_ppod %>%
+  group_by(yod) %>%
+  ppodtable %>%
+  mutate(yod=as.character(yod),
+         group="Year of death") %>%
+  rename(category = yod) %>%
+  select(group, category, everything())
+
+summary_ucod2024 <- summary_ppod %>%
+  filter(yod==2024) %>%
+  group_by(ucod_cat) %>%
+  ppodtable %>%
+  mutate(group = "UCOD (2024)") %>%
+  rename(category = ucod_cat) %>%
+  select(group, category, everything())
+
+summary_pod2024 <- summary_ppod %>%
+  filter(yod==2024) %>%
+  group_by(eol_pod) %>%
+  ppodtable %>%
+  mutate(group = "Place of death (2024)") %>%
+  rename(category = eol_pod) %>%
+  select(group, category, everything())
+
+```
+
+Perhaps 
+
+* for some ppod discussion is initiated but the person does not engage - how is that recorded ?  
+* maybe ppod was established already but not discussed
+
+Anyway, I've gone with with a flag based on having any record with either 
+
+* Type field is valid except 99 (not discussed) 
+
+OR 
+
+* DiscussedPreferredDeathLocation_Indicator is "Y" or "1"  - although the spec says to expect Y/N a small number of records are coded (1,0)   
+
+
+```{r summary, echo=FALSE}
+
+table_out <- bind_rows(
+  summary_year,
+  summary_ucod2024,
+  summary_pod2024)
+
+table_out
+
+```
+
+```{r descriptive pod, echo = FALSE}
+
+summary_data <- summary_ppod %>%
+  ungroup() %>%
+  mutate(
+    ppod = as.integer(ppod),
+    referral_type = factor(
+      case_when(
+        referrals == 0 ~ "None",
+        referrals == 1 & eol_referral == 0 ~ "Ref no eol",
+        referrals == 1 & eol_referral == 1 ~ "Ref eol",
+        TRUE ~ "e"),
+      levels=c("Ref eol", "Ref no eol", "None")),
+    ucod_cat = factor(ucod_cat),
+    yod=factor(yod),
+    eol_pod = factor(eol_pod, levels = c("Hospital", "Home", "Care home", "Hospice", "Other places")),
+    dths,
+    .keep="none"
+  ) %>%
+  group_by(ppod,
+    referral_type,
+    ucod_cat,
+    yod,
+    eol_pod) %>%
+  summarise(dths=sum(dths), .groups = "drop") 
+
+pc_pod <- summary_data %>%
+  filter(yod == 2024) %>%
+  group_by(referral_type, eol_pod, ucod_cat) %>%
+  summarise(dths=sum(dths)) %>%
+  group_by( referral_type, ucod_cat) %>%
+  mutate(
+    den_dths = sum(dths), 
+    pc = 100 * dths / den_dths) %>%
+  ungroup() %>%
+  arrange(eol_pod, referral_type)
+
+pc_pod %>%
+  ggplot(aes(colour=eol_pod, y=pc, x =referral_type, group=eol_pod )) +
+    geom_line() +
+    facet_wrap(~ucod_cat)
+
+pc_pod_ppod <- summary_data %>%
+  filter(yod == 2024, !referral_type==0) %>%
+  group_by(ppod, eol_pod, ucod_cat) %>%
+  summarise(dths=sum(dths)) %>%
+  group_by( ppod, ucod_cat) %>%
+  mutate(
+    den_dths = sum(dths), 
+    pc = 100 * dths / den_dths,
+    ppod = factor(ifelse(ppod==0, "No","Yes"))) %>%
+  ungroup() %>%
+  arrange(eol_pod, ppod)
+
+pc_pod_ppod %>%
+  ggplot(aes(y=pc, x = eol_pod, group=eol_pod, colour=eol_pod )) +
+    geom_line() +
+    geom_point(aes(size=ppod)) +
+    facet_wrap(~ucod_cat) +
+    scale_size_discrete(range=c(1,2.5))
+  
+pc_pod_ppod_eolref <- summary_data %>%
+  filter(yod == 2024) %>%
+  mutate(
+    csds = case_when(
+      referral_type == "None" ~ 5,
+      referral_type == "Ref no eol" & ppod == 0 ~ 4,
+      referral_type == "Ref no eol" & ppod == 1 ~ 3,
+      referral_type == "Ref eol" & ppod == 0 ~ 2,
+      referral_type == "Ref eol" & ppod == 1 ~ 1,
+      TRUE ~ 6
+    ) %>%
+      factor(levels = 1:6, labels = c("Ref eol\nppod",
+                                      "Ref eol\nno ppod", 
+                                      "Ref no eol\nppod", 
+                                      "Ref no eol\nno ppod", 
+                                      "none",
+                                      "err"))) %>%
+  group_by(csds, eol_pod, ucod_cat) %>%
+  summarise(dths=sum(dths)) %>%
+  group_by( csds, ucod_cat) %>%
+  mutate(
+    den_dths = sum(dths), 
+    pc = 100 * dths / den_dths) %>%
+  ungroup() %>%
+  arrange(ucod_cat, csds, eol_pod, csds)
+
+pc_pod_ppod_eolref %>%
+  ggplot(aes(y=pc, x = csds, group=eol_pod, colour=eol_pod )) +
+    geom_line() +
+#    geom_point(aes(size=ppod)) +
+    facet_wrap(~ucod_cat)
+
+
+
+pc_pod_ppod_eolref %>%
+  group_by(csds, eol_pod) %>%
+  summarise(dths=sum(dths)) %>%
+  group_by( csds) %>%
+  mutate(
+    den_dths = sum(dths), 
+    pc = 100 * dths / den_dths) %>%
+  ungroup() %>%
+  ggplot(aes(y=pc, x = csds, group=eol_pod, colour=eol_pod )) +
+    geom_line() 
+
+
+
+```
+```{r pod ppod, echo = FALSE}
+
+ppod_eolpod_summary1 <- ppod_eolpod %>%
+  mutate(
+    eol_pod = case_when(
+      eol_pod %in% c("Home", "Other places") ~ "Home or Other",
+      TRUE ~ eol_pod),
+    ppod_detail = case_when(
+      str_starts(DeathLocationPreferred_Type, "1") ~ "Hospital",
+      str_starts(DeathLocationPreferred_Type, "2") ~ "Home or Other",
+      str_starts(DeathLocationPreferred_Type, "3") ~ "Hospice",
+      str_starts(DeathLocationPreferred_Type, "4") ~ "Care home",
+      str_starts(DeathLocationPreferred_Type, "5") ~ "Home or Other",
+      str_starts(DeathLocationPreferred_Type, "9") ~ "Not discussed",
+      TRUE ~ "Missing"),
+    ppod_cat = case_when(
+      referral == 0 ~ "NA",
+      ppod_detail %in% c("Not discussed", "Missing") ~  ppod_detail, 
+      TRUE ~ "Present")
+    ) %>%
+  group_by(referral, ppod_detail, ppod_cat, eol_pod) %>%
+  summarise(dths = sum(dths)) %>%
+  group_by(ppod_cat) %>%
+  mutate(
+    cat_denominator = sum(dths) ) %>% 
+  ungroup()
+
+ppod_eolpod_summary2 <- bind_rows(
+  ppod_eolpod_summary1 %>%
+    group_by(ppod_cat, cat_denominator, ppod_detail) %>%
+    summarise(dths = sum(dths)) %>%
+    rename(pod = ppod_detail) %>%
+    mutate(cat = "ppod")
+  ,
+  ppod_eolpod_summary1 %>%
+    group_by(ppod_cat, cat_denominator, eol_pod) %>%
+    summarise(dths = sum(dths)) %>%
+    rename(pod = eol_pod) %>%
+    mutate(cat = "apod")) %>%
+  mutate(pc = 100 * dths/cat_denominator ) %>% 
+  filter(!pod %in% c("Missing", "Not discussed")) 
+
+ppod_eolpod_summary2 %>% 
+  filter(cat == "apod") %>%
+  ggplot(aes(x=pod, y = pc, fill = ppod_cat, group = ppod_cat)) +
+    geom_col(position = position_dodge()) 
+
+ppod_eolpod_summary2 %>% 
+  filter(ppod_cat == "Present") %>%
+  ggplot(aes(x=pod, y = pc, fill = cat, group = cat)) +
+    geom_col(position = position_dodge()) 
+
+```
+
+
+```{r save_to_xlsx, echo=FALSE}
+
+if (!dir.exists("../output")) dir.create("../output")
+
+wb <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb, sheetName = "ppod")
+
+openxlsx::writeData(
+  wb, 
+  sheet="ppod",
+  x =  table_out %>%
+    select(-starts_with("pc"), -ratio) %>%
+    mutate(across(where(is.integer), round_ft))) 
+
+openxlsx::saveWorkbook(wb, "../output/ppod.xlsx", overwrite = TRUE)
+
+```
+ 

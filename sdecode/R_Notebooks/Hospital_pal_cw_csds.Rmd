@@ -1,0 +1,266 @@
+Are people with hospital recorded palliative care more likely to have a CSDS referal for end of life care ?
+
+```{r set up, message=FALSE, warning=FALSE, include=FALSE}
+
+library(SparkR)
+library(sparklyr)
+library(DBI)
+library(tidyverse)
+library(dbplyr)
+if (!require(afcharts)) install.packages('afcharts')
+library(afcharts)
+if (!require(openxlsx)) install.packages('openxlsx')
+library(openxlsx)
+
+con <- dbConnect(
+  odbc::odbc(),
+  dsn = 'Databricks',
+  HTTPPath = 'sql/protocolv1/o/8723547585282153/0418-181355-5lqiplri',
+  PWD = rstudioapi::askForPassword('Please enter Databricks PAT')
+)
+
+is.integer64 <- function(x) {class(x)=="integer64"}
+
+round_f <- function(x) {
+  ifelse(
+    x < 10,
+    0,
+    10 * round(x/10)
+    )}
+
+round_ft <- function(x) {
+  y <- round_f(x)
+  ifelse(
+    y ==0,
+    "<10",
+    format(y)
+  )}
+```
+
+```{sql set_up_deaths_view, connection=con, output.var = "test2_df"}
+--SET NOCOUNT ON;
+
+-- The aim is to label people who had SPC in hospital  and whether they were subsequently discharge alive
+-- We can then go on to explore whether these people were more likely to have an community EOL referral 
+-- recorded in CSDS
+
+-- Identify deaths of England resident during 2024 (using date of occurrence)
+-- The peolc table already excludes neonates and non England residents
+
+CREATE OR REPLACE TEMPORARY VIEW v_dths24 AS
+SELECT dths.*
+FROM  hive_metastore.dsa_484452_h8s1l_collab.peolc_deaths_cohort dths
+WHERE yod = 2024;
+
+```
+
+```{sql set_up_spells_view, connection=con, output.var = "test2_df"}
+
+-- Identify spells where HES records palliativecare
+
+CREATE OR REPLACE TEMPORARY VIEW v_hes_sp AS
+SELECT
+hes.PERSON_ID_DEID 
+,d.dod
+,sp.P_SPELL_ID
+,sp.ADMIMETH
+,sp.ADMIDATE
+,sp.DISDATE
+,CASE WHEN sp.DISMETH = '4' OR sp.DISDEST = '79' THEN 1 ELSE 0 END AS DIS_DEAD
+,MAX(CASE WHEN hes.TRETSPEF = 315 THEN 1 ELSE 0 END) AS PAL_TRETSPEF
+,MAX(CASE WHEN hes.DIAG_4_CONCAT LIKE '%Z515%' THEN 1 ELSE 0 END) AS PAL_DIAG
+FROM hive_metastore.dsa_484452_h8s1l_collab.hes_apc_all_years hes   
+INNER JOIN v_dths24 d  ON hes.PERSON_ID_DEID = d.DEC_CONF_NHS_NUMBER_CLEAN_DEID
+INNER JOIN dsa_484452_h8s1l_collab.daps_hes_apc_spell_ID_all_years spid ON hes.EPIKEY = spid.EPIKEY
+INNER JOIN dsa_484452_h8s1l_collab.daps_hes_apc_spells_all_years sp ON spid.P_SPELL_ID = sp.P_SPELL_ID
+WHERE -- TRETSPEF = 315 OR DIAG_4_CONCAT LIKE '%Z515%'
+DATEDIFF(dod, hes.DISDATE) <365
+GROUP BY hes.PERSON_ID_DEID 
+,d.dod
+,sp.P_SPELL_ID
+,sp.ADMIDATE
+,sp.ADMIMETH
+,sp.DISDATE
+,sp.DISMETH
+,sp.DISDEST;
+
+```
+
+```{sql set_up_person_view, connection=con, output.var = "test2_df"}
+
+-- Identify earliest "palliative" spell per person and whether the person was discharged alive 
+CREATE OR REPLACE TEMPORARY VIEW v_hes_p AS 
+SELECT
+PERSON_ID_DEID,
+dod,
+COUNT(*) AS n_spells,
+SUM(CASE WHEN ADMIMETH LIKE '2%' THEN 1 ELSE 0 END) AS n_em_spells,
+SUM(CASE WHEN ADMIMETH LIKE '2%' AND DIS_DEAD=0 THEN 1 ELSE 0 END) AS n_em_spells_dis_alive, 
+SUM(CASE WHEN PAL_TRETSPEF + PAL_DIAG > 0 THEN 1 ELSE 0 END) AS n_spells_pal,
+MIN(DISDATE) AS disdate_first,
+MIN(CASE 
+      WHEN DIS_DEAD = 0 THEN DISDATE 
+      ELSE NULL 
+      END ) AS disdate_first_alive, 
+MIN(CASE WHEN PAL_TRETSPEF + PAL_DIAG > 0 THEN DISDATE ELSE NULL END ) AS disdate_first_pal,
+MIN(CASE 
+      WHEN PAL_TRETSPEF + PAL_DIAG > 0 AND DIS_DEAD = 0 THEN DISDATE 
+      ELSE NULL 
+      END ) AS disdate_first_pal_alive 
+FROM v_hes_sp
+GROUP BY PERSON_ID_DEID, dod;
+
+```
+
+```{r check, echo = FALSE}
+
+
+```
+```{sql set_up_referral_view, connection=con, output.var = "test2_df"}
+CREATE OR REPLACE TEMPORARY VIEW v_ref AS 
+SELECT 
+ref.PERSON_ID_DEID,
+ref.Pseudo_Unique_ServiceRequestID,
+ref.ReferralRequest_ReceivedDate,
+ CASE 
+        WHEN Pseudo_PrimaryReferralReason = '026'
+            OR Pseudo_ReferralReason_Other LIKE '%026%'
+            OR TeamType = 14 THEN 1
+        ELSE 0 END AS eol_referral
+FROM 
+hive_metastore.dsa_484452_h8s1l_collab.peolc_csds_ref ref
+INNER JOIN v_dths24 dth 
+ON ref.PERSON_ID_DEID = dth.DEC_CONF_NHS_NUMBER_CLEAN_DEID
+
+```
+
+```{sql set_up_ref_hes_view, connection=con, output.var = "test2_df"}
+CREATE OR REPLACE TEMPORARY VIEW v_refhes AS
+SELECT
+  dth.DEC_CONF_NHS_NUMBER_CLEAN_DEID AS PERSON_ID_DEID,
+  dth.xage_cat,
+  dth.ucod_cat,
+  ref.* EXCEPT (ref.PERSON_ID_DEID), 
+  hes.* EXCEPT (hes.PERSON_ID_DEID)
+  
+FROM 
+  v_dths24 AS dth
+  LEFT JOIN 
+  (
+    SELECT 
+    PERSON_ID_DEID, 
+    MAX(CASE WHEN eol_referral = 1 THEN ReferralRequest_ReceivedDate ELSE NULL END) AS eol_ref_last, 
+    MIN(CASE WHEN eol_referral = 1 THEN ReferralRequest_ReceivedDate ELSE NULL END) AS eol_ref_first, 
+    MAX(ReferralRequest_ReceivedDate ) AS ref_last ,
+    MIN(ReferralRequest_ReceivedDate ) AS ref_first
+    FROM v_ref 
+    GROUP BY PERSON_ID_DEID) AS ref ON dth.DEC_CONF_NHS_NUMBER_CLEAN_DEID = ref.PERSON_ID_DEID
+LEFT JOIN v_hes_p hes 
+ON dth.DEC_CONF_NHS_NUMBER_CLEAN_DEID = hes.PERSON_ID_DEID
+
+```
+
+```{r summary, echo = FALSE}
+
+tbl(con, sql("SELECT * FROM v_refhes LIMIT 500")) %>% collect() %>% View()
+
+summary <-tbl(con, sql("
+SELECT q.*, COUNT(*) AS people
+FROM
+(SELECT
+xage_cat,
+ucod_cat,
+CASE WHEN IFNULL(n_em_spells_dis_alive,0) > 0 THEN 1 ELSE 0 END AS em_spells_dis_alive,  
+CASE WHEN disdate_first IS NOT NULL THEN 1 ELSE 0 END AS adm,
+CASE WHEN disdate_first_pal IS NOT NULL THEN 1 ELSE 0 END AS adm_pal,
+CASE WHEN disdate_first_pal_alive IS NOT NULL THEN 1 ELSE 0 END AS adm_pal_alive,
+CASE WHEN ref_first IS NOT NULL THEN 1 ELSE 0 END AS ref,
+CASE WHEN eol_ref_first IS NOT NULL THEN 1 ELSE 0 END AS ref_eol,
+CASE WHEN DATEDIFF(eol_ref_last, disdate_first_pal_alive) >= 0 THEN 1 ELSE 0 END AS eol_ref_after_pal
+FROM v_refhes) AS q
+GROUP BY xage_cat, ucod_cat,em_spells_dis_alive, adm, adm_pal, adm_pal_alive, ref, ref_eol, eol_ref_after_pal
+")) %>% 
+  collect() %>%
+  mutate(people = as.integer(people))
+
+# dths_total <- tbl(con, sql("SELECT COUNT(*) AS n FROM v_dths24")) %>% collect() %>% pull(n) %>% as.integer()
+
+summary %>% arrange(ucod_cat, xage_cat, em_spells_dis_alive, adm_pal_alive, ref_eol) %>% View()
+
+```
+```{r tidy_summary, echo=OFF}
+
+summary_table <- summary %>% 
+  mutate(people = as.integer(people)) %>%
+  summarise(
+  'Total deaths (2024)' = sum(people),
+  'With hospital spell' = sum(adm * people),
+  'With palliative hospital spell' = sum(adm_pal * people),
+  'Discharged alive after a palliative hospital spell' = sum(adm_pal_alive * people),
+  'With CS referral' = sum(ref * people),
+  'With CS EOL referral' = sum(ref_eol * people),
+  'With CS referral AND hospital spell' = sum(adm * ref * people),
+  'With CS EOL referral AND a palliative hospital spell' =sum(ref_eol * people * adm_pal),
+  'With CS EOL referral AND discharged alive from palliative hospital spell' =sum(ref_eol * people * adm_pal_alive),
+  'With CS EOL referral AFTER a palliative hospital spell' = sum(eol_ref_after_pal * people)) %>%
+  mutate(Stat="people") %>%
+  data.table::transpose(make.names = 'Stat', keep.names = 'Stat')
+  
+summary_table
+
+summary2 <- summary %>% 
+  group_by(xage_cat, ucod_cat, adm_pal_alive) %>%
+  summarise(
+    total = sum(people) , 
+    total_eol_ref = sum(people[ref_eol==1]),
+    em_dis_alive = sum(people[em_spells_dis_alive == 1]),
+    eda_and_ref_eol = sum(people[ref_eol==1 & em_spells_dis_alive == 1])) %>%
+  mutate(
+    ref_eol_all_pc = 100 *  total_eol_ref/total,
+    ref_eol_pc = 100 * eda_and_ref_eol/em_dis_alive) %>%
+  group_by(xage_cat, ucod_cat) %>%
+  mutate(
+    ratio_all = sum(ref_eol_all_pc[adm_pal_alive==1]) / sum(ref_eol_all_pc[adm_pal_alive==0]),
+    ratio = sum(ref_eol_pc[adm_pal_alive==1]) / sum(ref_eol_pc[adm_pal_alive==0]))
+  
+summary2 %>%
+  arrange(ucod_cat, xage_cat, adm_pal_alive) %>%
+  View()
+
+summary2 %>%
+  filter(!ucod_cat=="Other" & !xage_cat=="0-17") %>% 
+  select(ucod_cat, xage_cat, adm_pal_alive, ratio) %>%
+  unique() %>%
+  ggplot(aes(x=xage_cat, y=ratio)) +
+  geom_col() +
+  facet_wrap(~ucod_cat) +
+  labs(title ="At least 1 alive discharge after em adm")
+
+summary2 %>%
+  filter(!ucod_cat=="Other" & !xage_cat=="0-17") %>% 
+  select(ucod_cat, xage_cat, adm_pal_alive, ratio_all) %>%
+  unique() %>%
+  ggplot(aes(x=xage_cat, y=ratio_all)) +
+  geom_col() +
+  facet_wrap(~ucod_cat) +
+  labs(title = "No exclusions")
+
+
+summary2 %>%
+  filter(!ucod_cat=="Other" & !xage_cat=="0-17") %>% 
+  select(ucod_cat, xage_cat, adm_pal_alive, ratio) %>%
+  unique() %>%
+  ggplot(aes(x=xage_cat, y=ratio)) +
+  geom_col() +
+  facet_wrap(~ucod_cat) +
+  title("No exclusions")
+
+summary3 <- summary %>%
+  filter(!ucod_cat=="Other" & !xage_cat=="0-17") %>% 
+  group_by(ucod_cat, xage_cat, ref_eol, adm_pal_alive) %>%
+  summarise(people=sum(people))
+
+
+
+```
+                       

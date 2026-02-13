@@ -1,0 +1,1041 @@
+{
+
+ "cells": [
+
+  {
+
+   "cell_type": "code",
+
+   "execution_count": 0,
+
+   "metadata": {
+
+    "application/vnd.databricks.v1+cell": {
+
+     "cellMetadata": {
+
+      "byteLimit": 2048000,
+
+      "rowLimit": 10000
+
+     },
+
+     "inputWidgets": {},
+
+     "nuid": "e25fcc4a-bc6d-41fe-a0f0-d1051a7f11d7",
+
+     "showTitle": true,
+
+     "tableResultSettingsMap": {
+
+      "0": {
+
+       "dataGridStateBlob": "{\"version\":1,\"tableState\":{\"columnPinning\":{\"left\":[\"#row_number#\"],\"right\":[]},\"columnSizing\":{},\"columnVisibility\":{}},\"settings\":{\"columns\":{}},\"syncTimestamp\":1761735807348}",
+
+       "filterBlob": null,
+
+       "queryPlanFiltersBlob": null,
+
+       "tableResultIndex": 0
+
+      }
+
+     },
+
+     "title": "LSOA LA  lookup"
+
+    }
+
+   },
+
+   "outputs": [],
+
+   "source": [
+
+    "%sql\n",
+
+    "-- I cant find a look up. This is my effort giving LTLA, UTLA and region for about 2019 ?\n",
+
+    "-- Its all rather old, works in LSOA11 and does not include the current \n",
+
+    "-- geographic configuration\n",
+
+    "\n",
+
+    "CREATE OR REPLACE TABLE dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_lsoa_ltla AS\n",
+
+    "SELECT DISTINCT lsoa.geogcd AS lsoa11cd, lsoa.geognm AS lsoa11nm, msoa.parentcd AS ltlacd\n",
+
+    "FROM \n",
+
+    "( SELECT geogcd, max(geognm) geognm, max(parentcd) parentcd\n",
+
+    "  FROM dhsc_byod.geographical_codes_lsoa_msoa_E01_LSOA\n",
+
+    "  WHERE status = 'live'\n",
+
+    "  GROUP BY geogcd) AS lsoa\n",
+
+    "LEFT JOIN \n",
+
+    "( SELECT geogcd, max(geognm) geognm, max(parentcd) parentcd\n",
+
+    "  FROM dhsc_byod.geographical_codes_lsoa_msoa_E02_MSOA \n",
+
+    "  WHERE status = 'live'\n",
+
+    "  GROUP BY geogcd) AS msoa\n",
+
+    "ON lsoa.parentcd = msoa.geogcd;\n",
+
+    "\n",
+
+    "-- SELECT * FROM dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_lsoa_ltla WHERE ltlacd IS NULL\n",
+
+    "\n",
+
+    "CREATE OR REPLACE TABLE dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_ltla_utla\t AS\n",
+
+    "\n",
+
+    "WITH ltla AS (\n",
+
+    "  SELECT DISTINCT geogcd AS ltlacd, geognm AS ltlanm, parentcd parentcdltla, status\n",
+
+    "      FROM dhsc_byod.geographical_codes_lsoa_msoa_E06_UA\n",
+
+    "\n",
+
+    "  UNION \n",
+
+    "\n",
+
+    "   SELECT DISTINCT geogcd AS ltlacd, geognm AS ltlanm, parentcd parentcdltla, status\n",
+
+    "   FROM dhsc_byod.geographical_codes_lsoa_msoa_E07_NMD\n",
+
+    "\n",
+
+    "  UNION \n",
+
+    "\n",
+
+    "  SELECT DISTINCT geogcd AS ltlacd, geognm AS ltlanm, parentcd parentcdltla, status\n",
+
+    "  FROM dhsc_byod.geographical_codes_lsoa_msoa_E08_MD\n",
+
+    "\n",
+
+    "  UNION \n",
+
+    "\n",
+
+    "  SELECT DISTINCT geogcd AS ltlacd, geognm AS ltlanm, parentcd parentcdltla, status\n",
+
+    "  FROM dhsc_byod.geographical_codes_lsoa_msoa_E09_LONB\n",
+
+    "   )\n",
+
+    ",   \n",
+
+    "ltla2 AS (\n",
+
+    "  SELECT ltla.ltlacd, max(ltla.ltlanm) ltlanm, max(ltla.parentcdltla) AS parentcdltla\n",
+
+    "  FROM ltla\n",
+
+    "  INNER JOIN dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_lsoa_ltla chk\n",
+
+    "  ON chk.ltlacd = ltla.ltlacd\n",
+
+    "  GROUP BY ltla.ltlacd\n",
+
+    ")\n",
+
+    ",\n",
+
+    "cty AS (\n",
+
+    "    SELECT geogcd, max(geognm) AS geognm, max(parentcd) parentcd\n",
+
+    "    FROM dhsc_byod.geographical_codes_lsoa_msoa_E10_CTY cty\n",
+
+    "    INNER JOIN ltla2 ON cty.geogcd = ltla2.parentcdltla\n",
+
+    "    GROUP BY geogcd)\n",
+
+    "\n",
+
+    "  SELECT ltlacd, ltlanm, \n",
+
+    "  COALESCE(cty.geogcd, ltlacd) AS utlacd,\n",
+
+    "  COALESCE(cty.geognm, ltlanm) AS utlanm,  \n",
+
+    "  COALESCE(cty.parentcd, parentcdltla) AS parentcd_utla\n",
+
+    "  FROM\n",
+
+    "  ltla2              \n",
+
+    "  LEFT JOIN cty\n",
+
+    "  ON ltla2.parentcdltla = cty.geogcd;\n",
+
+    "--\n",
+
+    "-- SELECT * FROM dsa_484452_h8s1l_collab.peolc_geog_ltla_utla WHERE utlacd IS NULL\n",
+
+    "--\n",
+
+    "\n",
+
+    "CREATE OR REPLACE TABLE dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_lsoa_ltla_utla AS \n",
+
+    "SELECT lt.*, ut.utlacd, ut.utlanm, ut.parentcd_utla AS regioncd\n",
+
+    "FROM dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_lsoa_ltla lt\n",
+
+    "LEFT JOIN dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_ltla_utla ut\n",
+
+    "ON lt.ltlacd = ut.ltlacd;\n",
+
+    "\n",
+
+    "--SELECT * FROM dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_lsoa_ltla_utla WHERE utlacd IS NULL\n",
+
+    "\n",
+
+    "-------------------------------------------------------\n",
+
+    "/*\n",
+
+    "WITH lsoa AS (\n",
+
+    "SELECT DISTINCT lsoacd, lsoaparent\n",
+
+    "FROM (\n",
+
+    "SELECT geogcd lsoacd, max(parentcd) lsoaparent \n",
+
+    "FROM dhsc_byod.geographical_codes_lsoa_msoa_E01_LSOA\n",
+
+    "WHERE status = 'live'\n",
+
+    "GROUP BY geogcd) AS  ls\n",
+
+    "INNER JOIN (\n",
+
+    "SELECT * FROM dsa_484452_h8s1l_collab.peolc_geog\n",
+
+    "WHERE ltlacd IS NULL OR utlacd IS NULL OR rgncd IS NULL)  Qry\n",
+
+    "ON ls.lsoacd = Qry.lsoa11cd\n",
+
+    ")\n",
+
+    "\n",
+
+    "SELECT lsoaparent, msoa.*\n",
+
+    "FROM lsoa\n",
+
+    "LEFT JOIN\n",
+
+    "(SELECT geogcd, max(parentcd) parentcd \n",
+
+    "FROM dhsc_byod.geographical_codes_lsoa_msoa_E02_MSOA\n",
+
+    "WHERE status = 'live'\n",
+
+    "GROUP BY geogcd) AS msoa\n",
+
+    "ON lsoa.lsoaparent=msoa.geogcd\n",
+
+    "ORDER BY lsoaparent;\n",
+
+    "----------------------------------------------------------\n",
+
+    "SELECT DISTINCT LEFT(parentcd,3) AS p3\n",
+
+    "FROM \n",
+
+    "(SELECT geogcd, max(parentcd) parentcd \n",
+
+    "FROM dhsc_byod.geographical_codes_lsoa_msoa_E02_MSOA\n",
+
+    "WHERE status = 'live'\n",
+
+    "GROUP BY geogcd) AS qry\n",
+
+    "*/\n",
+
+    ";"
+
+   ]
+
+  },
+
+  {
+
+   "cell_type": "code",
+
+   "execution_count": 0,
+
+   "metadata": {
+
+    "application/vnd.databricks.v1+cell": {
+
+     "cellMetadata": {
+
+      "byteLimit": 2048000,
+
+      "rowLimit": 10000
+
+     },
+
+     "inputWidgets": {},
+
+     "nuid": "0116eb4a-5c2b-430c-9011-4a5ed57a1843",
+
+     "showTitle": true,
+
+     "tableResultSettingsMap": {
+
+      "0": {
+
+       "dataGridStateBlob": "{\"version\":1,\"tableState\":{\"columnPinning\":{\"left\":[\"#row_number#\"],\"right\":[]},\"columnSizing\":{\"name_trim\":267},\"columnVisibility\":{}},\"settings\":{\"columns\":{}},\"syncTimestamp\":1757940484939}",
+
+       "filterBlob": null,
+
+       "queryPlanFiltersBlob": null,
+
+       "tableResultIndex": 0
+
+      }
+
+     },
+
+     "title": "Deaths wide cohort"
+
+    }
+
+   },
+
+   "outputs": [],
+
+   "source": [
+
+    "-- Includes England residents (by last hopspital LSOA), deaths occuring 2020-2024\n",
+
+    "-- duplicated deaths removed\n",
+
+    "-- neonatal deaths removed\n",
+
+    "\n",
+
+    "-- adds: place of death\n",
+
+    "\n",
+
+    "-- Could be smarter than this - maybe spot \"best row\"\n",
+
+    "DROP TABLE IF EXISTS dsa_484452_h8s1l_collab.peolc_duplicate_deaths; \n",
+
+    "CREATE TABLE dsa_484452_h8s1l_collab.peolc_duplicate_deaths  AS \n",
+
+    "SELECT DEC_CONF_NHS_NUMBER_CLEAN_DEID, COUNT(*) AS reps\n",
+
+    "FROM dars_nic_484452_h8s1l.deaths_dars_nic_484452_h8s1l\n",
+
+    "GROUP BY DEC_CONF_NHS_NUMBER_CLEAN_DEID\n",
+
+    "HAVING COUNT(*)  > 1;\n",
+
+    "\n",
+
+    "DROP TABLE IF EXISTS dsa_484452_h8s1l_collab.peolc_deaths_cohort;\n",
+
+    "CREATE TABLE dsa_484452_h8s1l_collab.peolc_deaths_cohort AS\n",
+
+    "SELECT  \n",
+
+    "d.DEC_CONF_NHS_NUMBER_CLEAN_DEID,\n",
+
+    "d.REG_DATE_OF_DEATH,\n",
+
+    "TO_DATE(d.REG_DATE_OF_DEATH, 'yyyyMMdd') AS dod,\n",
+
+    "TO_DATE(d.REG_DATE, 'yyyyMMdd') AS  dor,\n",
+
+    "CAST(LEFT(d.REG_DATE_OF_DEATH,4) AS INT) AS yod,\n",
+
+    "CAST(LEFT(d.REG_DATE,4) AS INT) AS xyear,\n",
+
+    "CASE \n",
+
+    "  WHEN d.DEC_AGECUNIT IS NULL THEN NULL\n",
+
+    "  WHEN d.DEC_AGECUNIT IN (2,3,4)  THEN 0\n",
+
+    "\tELSE CAST(d.DEC_AGEC AS INT)\n",
+
+    "  END AS xage,\n",
+
+    "\tCASE \n",
+
+    "  WHEN d.DEC_AGECUNIT IS NULL THEN NULL\n",
+
+    "  WHEN d.DEC_AGECUNIT IN (2,3,4)  THEN '0-17'\n",
+
+    "\tWHEN CAST(d.DEC_AGEC AS INT) BETWEEN 0 AND 17 THEN '0-17' \n",
+
+    "\tWHEN CAST(d.DEC_AGEC AS INT) BETWEEN 18 AND 64 THEN '18-64'\n",
+
+    "\tWHEN CAST(d.DEC_AGEC AS INT) BETWEEN 65 AND 74 THEN '65-74'\n",
+
+    "\tWHEN CAST(d.DEC_AGEC AS INT) BETWEEN 75 AND 84 THEN '75-84'\n",
+
+    "\tWHEN CAST(d.DEC_AGEC AS INT) >= 85 THEN '85+'\n",
+
+    "  END AS xage_cat,\n",
+
+    "CASE\n",
+
+    "\t\tWHEN POD_ESTABLISHMENT_TYPE IN ('01', '1', '03', '3', '18', '99') and POD_NHS_ESTABLISHMENT = '1'then 'Hospital'\n",
+
+    "\t\tWHEN POD_ESTABLISHMENT_TYPE IN ('01', '1', '18', '19') and POD_NHS_ESTABLISHMENT = '2' then 'Hospital'\n",
+
+    "\t\tWHEN POD_ESTABLISHMENT_TYPE = '83' THEN 'Hospice'\n",
+
+    "\t\tWHEN POD_ESTABLISHMENT_TYPE IN ('02', '2', '04', '07','7', '10', '21') and POD_NHS_ESTABLISHMENT = '1' then 'Care home'\n",
+
+    "\t\tWHEN POD_ESTABLISHMENT_TYPE IN ('03', '3', '04', '4', '07', '7', '10', '14', '20', '22', '32', '33') and POD_NHS_ESTABLISHMENT = '2' then 'Care home'\n",
+
+    "\t\tWHEN POD_CODE = 'H' THEN 'Home'\n",
+
+    "\t\tWHEN POD_CODE = 'E' THEN 'Other places'\t\n",
+
+    "\t\tELSE 'Other places'\n",
+
+    "\t\tEND AS eol_pod,\n",
+
+    "\td.S_UNDERLYING_COD_ICD10 ucod,\n",
+
+    "\tCASE \n",
+
+    "\t\tWHEN d.S_UNDERLYING_COD_ICD10 LIKE 'C%' THEN 'Cancer' \n",
+
+    "\t\tWHEN LEFT(d.S_UNDERLYING_COD_ICD10,3) BETWEEN 'I00' AND 'I52' \n",
+
+    "\t\t\tOR LEFT(d.S_UNDERLYING_COD_ICD10,2) = 'I6' THEN 'Cardiovascular disease'\n",
+
+    "\t\tWHEN LEFT(d.S_UNDERLYING_COD_ICD10,3) IN ('N17', 'N18', 'N28') THEN 'Renal disease'\n",
+
+    "\t\tWHEN LEFT(d.S_UNDERLYING_COD_ICD10,3) BETWEEN 'K70' AND 'K77' THEN 'Liver disease'\n",
+
+    "\t\tWHEN LEFT(d.S_UNDERLYING_COD_ICD10,3) BETWEEN 'J06' AND 'J18'\n",
+
+    "\t\t\tOR LEFT(d.S_UNDERLYING_COD_ICD10,3) BETWEEN 'J40' AND 'J47'\n",
+
+    "\t\t\tOR LEFT(d.S_UNDERLYING_COD_ICD10,3) IN ('J20', 'J21', 'J22', 'J69') THEN 'Respiratory Disease'\n",
+
+    "\t\tWHEN LEFT(d.S_UNDERLYING_COD_ICD10, 3) IN ('G10', 'G20', 'G35') \n",
+
+    "\t\t\tOR LEFT(d.S_UNDERLYING_COD_ICD10, 4) IN ('G122', 'G231', 'G903') THEN 'Neurological disease'\n",
+
+    "\t\tWHEN LEFT(d.S_UNDERLYING_COD_ICD10, 3) IN ('F01', 'F03', 'G30', 'R54') THEN 'Dementia'\n",
+
+    "\t\tWHEN LEFT(d.S_UNDERLYING_COD_ICD10, 3) BETWEEN 'B20' AND 'B24' THEN 'HIV/AIDS'\n",
+
+    "\t\tWHEN LEFT(d.S_UNDERLYING_COD_ICD10, 1) BETWEEN 'V' AND 'Y' THEN 'External'\n",
+
+    "\t\tELSE 'Other'\n",
+
+    "\t\tEND AS ucod_cat,\n",
+
+    "\td.DEC_MARITAL_STATUS,\t\n",
+
+    "\td_lsoa.LSOA11,\n",
+
+    "\td_lsoa.SEX,\n",
+
+    "\td.DEC_SEX,\n",
+
+    "\td.NEO_NATE_FLAG,\n",
+
+    "\td.DEC_AGEC,\n",
+
+    "\td.DEC_AGECUNIT,\n",
+
+    "\tg.ltlacd, g.utlacd, g.utlanm, g.regioncd\n",
+
+    "FROM dars_nic_484452_h8s1l.deaths_dars_nic_484452_h8s1l d\n",
+
+    "INNER JOIN dsa_484452_h8s1l_collab.peolc_deaths_lsoa_from_hes d_lsoa\n",
+
+    "ON d.DEC_CONF_NHS_NUMBER_CLEAN_DEID = d_lsoa.PERSON_ID_DEID\n",
+
+    "LEFT JOIN (\tSELECT * \n",
+
+    "\t\t\t\t\t\tFROM dsa_484452_h8s1l_collab.peolc_duplicate_deaths \n",
+
+    "\t\t\t\t\t\t) AS dup\n",
+
+    "ON d.DEC_CONF_NHS_NUMBER_CLEAN_DEID = dup.DEC_CONF_NHS_NUMBER_CLEAN_DEID\n",
+
+    "LEFT JOIN dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_geog_lsoa_ltla_utla AS g \n",
+
+    "ON d_lsoa.LSOA11 = g.LSOA11cd\n",
+
+    "WHERE \n",
+
+    "LEFT(d.REG_DATE_OF_DEATH,4) BETWEEN 2020 AND 2024     -- Date of occurence\n",
+
+    "AND dup.DEC_CONF_NHS_NUMBER_CLEAN_DEID IS NULL\t\t\t\t-- Not a duplicate\n",
+
+    "AND d_lsoa.LSOA11 LIKE 'E%'\t\t\t\t\t\t\t\t\t\t\t\t\t\t-- England resident\n",
+
+    "AND IFNULL(d.NEO_NATE_FLAG, '0') <> '1';\t\t\t\t\t\t\t-- Not neonatal\n",
+
+    "\n",
+
+    "SELECT yod, COUNT(*) dths, SUM(iff(ucod_cat = 'Other', 0 , 1)) AS ucod_not_other \n",
+
+    "FROM dsa_484452_h8s1l_collab.peolc_deaths_cohort\n",
+
+    "GROUP BY yod\n",
+
+    "ORDER BY yod;\n",
+
+    "\n",
+
+    "SELECT DISTINCT xage_cat, DEC_AGEC, DEC_AGECUNIT\n",
+
+    "FROM dsa_484452_h8s1l_collab.peolc_deaths_cohort\n",
+
+    "ORDER BY DEC_AGECUNIT, DEC_AGEC;"
+
+   ]
+
+  },
+
+  {
+
+   "cell_type": "code",
+
+   "execution_count": 0,
+
+   "metadata": {
+
+    "application/vnd.databricks.v1+cell": {
+
+     "cellMetadata": {
+
+      "byteLimit": 2048000,
+
+      "rowLimit": 10000
+
+     },
+
+     "inputWidgets": {},
+
+     "nuid": "53a50ed5-9383-4e8e-86b9-d3c5cf8b68f2",
+
+     "showTitle": true,
+
+     "tableResultSettingsMap": {},
+
+     "title": "CSDS Activities"
+
+    }
+
+   },
+
+   "outputs": [],
+
+   "source": [
+
+    "SET spark.sql.shuffle.partitions=auto;\n",
+
+    "DROP TABLE IF EXISTS dsa_484452_h8s1l_collab.peolc_csds_act;\n",
+
+    "\n",
+
+    "CREATE TABLE dsa_484452_h8s1l_collab.peolc_csds_act\t AS\n",
+
+    "SELECT csds_act.*, dths.yod,  datediff(dths.dod, csds_act.Contact_Date) AS days_bf_eol  \n",
+
+    "FROM dsa_484452_h8s1l_collab.csds_care_activities_all_years csds_act \n",
+
+    "INNER JOIN dsa_484452_h8s1l_collab.peolc_deaths_cohort dths\n",
+
+    "ON csds_act.Person_ID_DEID = dths.DEC_CONF_NHS_NUMBER_CLEAN_DEID\n",
+
+    "WHERE datediff(dths.dod, csds_act.Contact_Date) <= 365;       -- Contact date in LYOL\n",
+
+    "\n",
+
+    "SELECT yod, COUNT(*) AS contacts \n",
+
+    "FROM dsa_484452_h8s1l_collab.peolc_csds_act\n",
+
+    "GROUP BY yod\n",
+
+    "ORDER BY yod;\n"
+
+   ]
+
+  },
+
+  {
+
+   "cell_type": "code",
+
+   "execution_count": 0,
+
+   "metadata": {
+
+    "application/vnd.databricks.v1+cell": {
+
+     "cellMetadata": {
+
+      "byteLimit": 2048000,
+
+      "rowLimit": 10000
+
+     },
+
+     "inputWidgets": {},
+
+     "nuid": "e95eb806-1bd5-4ecc-ac14-3c0fc932826c",
+
+     "showTitle": true,
+
+     "tableResultSettingsMap": {},
+
+     "title": "CSDS Diagnoses in LYOL"
+
+    }
+
+   },
+
+   "outputs": [],
+
+   "source": [
+
+    "SET spark.sql.shuffle.partitions=auto;\n",
+
+    "DROP TABLE IF EXISTS dsa_484452_h8s1l_collab.peolc_csds_diag;\n",
+
+    "\n",
+
+    "CREATE TABLE dsa_484452_h8s1l_collab.peolc_csds_diag\tAS\n",
+
+    "SELECT csds_diag.*, dths.yod,  datediff(dths.dod, csds_diag.Diagnosis_Date) AS days_bf_eol  \n",
+
+    "FROM dsa_484452_h8s1l_collab.csds_diagnoses_all_years csds_diag \n",
+
+    "INNER JOIN dsa_484452_h8s1l_collab.peolc_deaths_cohort dths\n",
+
+    "ON csds_diag.Person_ID_DEID = dths.DEC_CONF_NHS_NUMBER_CLEAN_DEID\n",
+
+    "WHERE datediff(dths.dod, csds_diag.Diagnosis_Date) <= 365;       -- Contact date in LYOL\n",
+
+    "\n",
+
+    "SELECT yod, COUNT(*) AS diagnoses, COUNT(DISTINCT Person_ID_DEID) people \n",
+
+    "FROM dsa_484452_h8s1l_collab.peolc_csds_diag\n",
+
+    "GROUP BY yod\n",
+
+    "ORDER BY yod;"
+
+   ]
+
+  },
+
+  {
+
+   "cell_type": "code",
+
+   "execution_count": 0,
+
+   "metadata": {
+
+    "application/vnd.databricks.v1+cell": {
+
+     "cellMetadata": {
+
+      "byteLimit": 2048000,
+
+      "rowLimit": 10000
+
+     },
+
+     "inputWidgets": {},
+
+     "nuid": "efb6a896-5562-4410-b50a-632c1a5784c0",
+
+     "showTitle": true,
+
+     "tableResultSettingsMap": {},
+
+     "title": "CSDS demographic and referrals"
+
+    }
+
+   },
+
+   "outputs": [],
+
+   "source": [
+
+    "SET spark.sql.shuffle.partitions=auto;\n",
+
+    "DROP TABLE IF EXISTS dsa_484452_h8s1l_collab.peolc_csds_ref_new;\n",
+
+    "CREATE TABLE dsa_484452_h8s1l_collab.peolc_csds_ref_new\t AS\n",
+
+    "WITH data1 AS (\n",
+
+    "SELECT DISTINCT \n",
+
+    "csds.*,\n",
+
+    "IFF(csds.Pseudo_PrimaryReferralReason IS NULL, 1, 0) AS reasonNULL,\n",
+
+    "IFF(csds.Pseudo_PrimaryReferralReason = '999', 1, 0) AS reason999,\n",
+
+    "IFF(csds.Pseudo_ReferralReason_Other IS NULL, 1, 0) AS reasonOtherNULL,\n",
+
+    "IFF(csds.Pseudo_ReferralReason_Other = '999', 1, 0) AS reasonOther999,\n",
+
+    "dths.dod,  dths.yod, dths.xyear, dths.LSOA11, dths.utlacd, dths.utlanm, dths.regioncd, dths.DEC_SEX, dths.xage_cat, dths.ucod_cat\n",
+
+    "FROM dsa_484452_h8s1l_collab.csds_demographics_and_referral_all_years csds \n",
+
+    "INNER JOIN dsa_484452_h8s1l_collab.peolc_deaths_cohort dths\n",
+
+    "ON csds.Person_ID_DEID = dths.DEC_CONF_NHS_NUMBER_CLEAN_DEID\n",
+
+    "LEFT JOIN dsa_484452_h8s1l_collab.peolc_csds_act act\n",
+
+    "ON csds.Pseudo_Unique_ServiceRequestID = act.Pseudo_Unique_ServiceRequestID\n",
+
+    "WHERE (datediff(dths.dod, csds.ReferralRequest_ReceivedDate) <= 365  -- Referral in last year of life\n",
+
+    "        OR act.Person_ID_DEID IS NOT NULL)                           -- Referral associated with activity in LYOL    \n",
+
+    "      AND csds.Pseudo_Unique_ServiceRequestID IS NOT NULL            -- Referral has an ID\n",
+
+    ")\n",
+
+    ",\n",
+
+    "data2 AS (\n",
+
+    "SELECT \n",
+
+    "  *, \n",
+
+    "  ROW_NUMBER() OVER(\n",
+
+    "    PARTITION BY Pseudo_Unique_ServiceRequestID\n",
+
+    "    ORDER BY reasonNULL, reason999, reasonOtherNULL, reasonOther999, ReferralRequest_ReceivedDate DESC)\n",
+
+    "    AS rown\n",
+
+    "FROM data1  \n",
+
+    ")\n",
+
+    ",\n",
+
+    "reasons_org AS (\n",
+
+    "SELECT * EXCEPT (reasonNULL, reason999, reasonOtherNULL, reasonOther999)\n",
+
+    "FROM data2\n",
+
+    "WHERE rown=1\n",
+
+    "ORDER BY Pseudo_Unique_ServiceRequestID\n",
+
+    ")\n",
+
+    ",\n",
+
+    "dates AS (\n",
+
+    "  SELECT \n",
+
+    "  Pseudo_Unique_ServiceRequestID,\n",
+
+    "  COUNT(*) AS nrows,\n",
+
+    "  COUNT(DISTINCT ReferralRequest_ReceivedDate ) AS ReqRecDate_nDistinct,\n",
+
+    "  COUNT(DISTINCT orgid_provider ) AS n_orgid_provider,\n",
+
+    "  MIN(ReferralRequest_ReceivedDate) AS ReqRecDate_earliest,\n",
+
+    "  MAX(ReferralRequest_ReceivedDate) AS ReqRecDate_latest\n",
+
+    "  FROM data1\n",
+
+    "  GROUP BY Pseudo_Unique_ServiceRequestID\n",
+
+    ")\n",
+
+    "  \n",
+
+    "SELECT reasons_org.*, dates.nrows, dates.ReqRecDate_nDistinct, dates.n_orgid_provider, dates.ReqRecDate_earliest, dates.ReqRecDate_latest\n",
+
+    "FROM reasons_org LEFT JOIN dates \n",
+
+    "ON reasons_org.Pseudo_Unique_ServiceRequestID = dates.Pseudo_Unique_ServiceRequestID;\n",
+
+    "----\n",
+
+    "DROP TABLE IF EXISTS dsa_484452_h8s1l_collab.peolc_csds_ref;\n",
+
+    "CREATE TABLE  dsa_484452_h8s1l_collab.peolc_csds_ref AS\n",
+
+    "SELECT * FROM dsa_484452_h8s1l_collab.peolc_csds_ref_new;\n",
+
+    "\n",
+
+    "DROP TABLE IF EXISTS dsa_484452_h8s1l_collab.peolc_csds_ref_new;\n",
+
+    "\n",
+
+    "-- \n",
+
+    "\n",
+
+    "SELECT yod, COUNT(DISTINCT Pseudo_Unique_ServiceRequestID) AS referrals \n",
+
+    "FROM dsa_484452_h8s1l_collab.peolc_csds_ref\n",
+
+    "GROUP BY yod\n",
+
+    "ORDER BY yod; "
+
+   ]
+
+  },
+
+  {
+
+   "cell_type": "code",
+
+   "execution_count": 0,
+
+   "metadata": {
+
+    "application/vnd.databricks.v1+cell": {
+
+     "cellMetadata": {
+
+      "byteLimit": 2048000,
+
+      "rowLimit": 10000
+
+     },
+
+     "inputWidgets": {},
+
+     "nuid": "b6530d92-46f9-4ddf-a08d-ecac15dbae1c",
+
+     "showTitle": true,
+
+     "tableResultSettingsMap": {},
+
+     "title": "CSDS Care plans"
+
+    }
+
+   },
+
+   "outputs": [],
+
+   "source": [
+
+    "DROP TABLE IF EXISTS dsa_484452_h8s1l_collab.peolc_csds_cplan;\n",
+
+    "CREATE TABLE dsa_484452_h8s1l_collab.peolc_csds_cplan\t AS\n",
+
+    "SELECT csds_cp.*, dths.dod, dths.eol_pod, dths.xage, dths.ucod\n",
+
+    "FROM dsa_484452_h8s1l_collab.csds_care_plans_all_years csds_cp \n",
+
+    "INNER JOIN dsa_484452_h8s1l_collab.peolc_deaths_2024 dths\n",
+
+    "ON csds_cp.Person_ID_DEID = dths.pid\n",
+
+    "--  WHERE datediff(dths.dod, csds_cp.Plan_LastUpdateDate) <= 730"
+
+   ]
+
+  },
+
+  {
+
+   "cell_type": "code",
+
+   "execution_count": 0,
+
+   "metadata": {
+
+    "application/vnd.databricks.v1+cell": {
+
+     "cellMetadata": {
+
+      "byteLimit": 2048000,
+
+      "rowLimit": 10000
+
+     },
+
+     "inputWidgets": {},
+
+     "nuid": "ce0cf2b3-bb17-4dfe-92e2-b7e769d660c8",
+
+     "showTitle": true,
+
+     "tableResultSettingsMap": {},
+
+     "title": "Demographic"
+
+    }
+
+   },
+
+   "outputs": [],
+
+   "source": [
+
+    "DROP TABLE IF EXISTS dsa_484452_h8s1l_collab.peolc_csds_demographic;\n",
+
+    "CREATE TABLE dsa_484452_h8s1l_collab.peolc_csds_demographic\t AS\n",
+
+    "WITH d1 AS (\n",
+
+    "SELECT DISTINCT\n",
+
+    "  ref.Person_ID_DEID,\n",
+
+    "  ref.LSOA,\n",
+
+    "  ref.LocalAuthority,\n",
+
+    "  ref.ReferralRequest_ReceivedDate,\n",
+
+    "  xYear, yod\n",
+
+    "FROM dsa_484452_h8s1l_collab.peolc_csds_ref AS ref\n",
+
+    "WHERE LSOA IS NOT NULL AND LocalAuthority IS NOT NULL )\n",
+
+    ",\n",
+
+    "d2 AS (\n",
+
+    "  SELECT \n",
+
+    "  *, \n",
+
+    "  row_number() OVER(PARTITION BY Person_ID_DEID ORDER BY ReferralRequest_ReceivedDate DESC) AS rown \n",
+
+    "  FROM d1)\n",
+
+    "\n",
+
+    "SELECT Person_ID_DEID,\n",
+
+    "  LSOA,\n",
+
+    "  LocalAuthority,\n",
+
+    "  xYear, yod \n",
+
+    "FROM d2\n",
+
+    "WHERE rown=1;\n",
+
+    "\n",
+
+    "SELECT COUNT(*) AS r \n",
+
+    "FROM dsa_484452_h8s1l_collab.peolc_csds_demographic;\n",
+
+    "\n",
+
+    "SELECT COUNT(*) AS More_than_one_entry\n",
+
+    "FROM (\n",
+
+    "SELECT Person_ID_DEID, COUNT(*) AS  rows\n",
+
+    "FROM dsa_484452_h8s1l_collab.peolc_csds_demographic\n",
+
+    "GROUP BY Person_ID_DEID) AS Q\n",
+
+    "WHERE Q.rows>1;\n"
+
+   ]
+
+  }
+
+ ],
+
+ "metadata": {
+
+  "application/vnd.databricks.v1+notebook": {
+
+   "computePreferences": null,
+
+   "dashboards": [],
+
+   "environmentMetadata": {
+
+    "base_environment": "",
+
+    "environment_version": "2"
+
+   },
+
+   "inputWidgetPreferences": null,
+
+   "language": "sql",
+
+   "notebookMetadata": {
+
+    "pythonIndentUnit": 4
+
+   },
+
+   "notebookName": "peolc_csds_cohort",
+
+   "widgets": {}
+
+  },
+
+  "language_info": {
+
+   "name": "sql"
+
+  }
+
+ },
+
+ "nbformat": 4,
+
+ "nbformat_minor": 0
+
+}
+
+ 

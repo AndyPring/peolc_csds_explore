@@ -1,0 +1,85 @@
+---
+title: "Referral receivers"
+output: html_notebook
+---
+```{r set up, message=FALSE, warning=FALSE, include=FALSE}
+
+library(SparkR)
+library(sparklyr)
+library(DBI)
+library(tidyverse)
+library(dbplyr)
+if (!require(afcharts)) install.packages('afcharts')
+library(afcharts)
+#if (!require(openxlsx)) install.packages('openxlsx')
+#library(openxlsx)
+
+con <- dbConnect(
+  odbc::odbc(),
+  dsn = 'Databricks',
+  HTTPPath = 'sql/protocolv1/o/8723547585282153/1007-063142-dtxq2zhk',
+  PWD = rstudioapi::askForPassword('Please enter Databricks PAT')
+)
+
+```
+
+```{sql makeReferral, connection = con, output.var=ref}
+
+-- CREATE OR REPLACE TEMPORARY VIEW peolc_ref AS 
+SELECT 
+PERSON_ID_DEID,
+Pseudo_Unique_ServiceRequestID,
+ReferralRequest_ReceivedDate,
+yod, LSOA11,
+OrgID_Provider,
+o.NAME,
+CASE 
+        WHEN Pseudo_PrimaryReferralReason = '026'
+            OR Pseudo_ReferralReason_Other LIKE '%026%'
+            OR TeamType IN (14,47) THEN 1
+        ELSE 0 END AS eol_referral
+      
+FROM dsa_484452_h8s1l.dsa_484452_h8s1l_collab.peolc_csds_ref r
+LEFT JOIN (SELECT DISTINCT ORG_CODE, NAME FROM reference_data.dss_corporate.org_daily WHERE ORG_IS_CURRENT =1) AS  o
+--LEFT JOIN dsa_484452_h8s1l.dsa_484452_h8s1l_collab.organisation_view o
+ON r.OrgID_Provider = o.ORG_CODE -- WHERE ActiveOrder=1
+
+```
+
+```{r org, echo = FALSE}
+
+ref %>%
+  filter(yod == 2024 & eol_referral==1) %>%
+  group_by(NAME) %>%
+  summarise(n=n()) %>%
+  arrange(desc(n)) %>%
+    View()
+  
+
+
+```
+
+
+
+```{r extract }
+
+# prov_chk <- tbl(con, sql("SELECT Org_ID, Org, count(*) FROM hive_metastore.dsa_484452_h8s1l_collab.organisation_view GROUP BY Org_ID, Org "))
+# prov_chk
+
+extract = tbl(con,sql("
+
+SELECT 
+OrgID_Provider,
+Org,
+SUM(eol_referral) AS referrals_eol,
+COUNT(*) AS referrals,
+COUNT(DISTINCT PERSON_ID_DEID) AS unique_people ,
+COUNT(DISTINCT CASE WHEN eol_referral=1 THEN PERSON_ID_DEID ELSE NULL END) AS unique_people_ref
+FROM peolc_ref
+GROUP BY
+OrgID_Provider, Org
+")) %>% collect()
+
+extract %>% group_by(OrgID_Provider) %>%  arrange(desc(unique_people) ) %>% View()
+
+``` 
